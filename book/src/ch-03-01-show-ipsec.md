@@ -5,7 +5,8 @@ over its VICI control socket — the same channel `swanctl` uses — and
 answer `% IPsec process not running` when charon is unreachable. The
 last two show the kernel's XFRM database and work without strongSwan.
 
-Every command also takes `--json` for machine-readable output.
+For machine-readable output request JSON through `vtyctl`, e.g.
+`vtyctl show --json "show vpn ipsec sa"`.
 
 ## show vpn ipsec sa
 
