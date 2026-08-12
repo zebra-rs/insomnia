@@ -2,5 +2,25 @@
 name = "insomnia"
 version = "0.1.0"
 edition = "2024"
+description = "Out-of-process firewall / IPsec enforcement daemon for zebra-rs"
+license = "AGPL-3.0-only"
 
 [dependencies]
+anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
+prost = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+# preserve_order matches zebra-rs, so JSON show output keeps the same
+# key order the in-process backends produced.
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.14"
+tonic-prost = "0.14"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
