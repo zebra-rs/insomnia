@@ -1,0 +1,17 @@
+[Unit]
+Description=insomnia — firewall / IPsec enforcement daemon for zebra-rs
+# Ordering only, not a requirement: insomnia retries the zebra-rs gRPC and
+# charon VICI connections forever, so it may start before (or without) either.
+After=network.target zebra-rs.service strongswan.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/bin/insomnia
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

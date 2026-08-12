@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+# insomnia runs as root from its systemd unit (both `nft -f -` and
+# `swanctl -q` need root), so unlike zebra-rs there is no service group to
+# create and no file capabilities to grant here.
+
+# cargo-deb injects the generated systemd fragments here: daemon-reload,
+# enable + start on install, restart-after-upgrade.
+#DEBHELPER#
+
+exit 0

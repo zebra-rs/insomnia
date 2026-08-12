@@ -1,0 +1,108 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
+  workflow_dispatch:
+
+permissions:
+  contents: write           # Required to push the nightly tag and release
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-debs.yaml
+    with:
+      nightly: true
+
+  # =====================================================================
+  # Single 'nightly' release: all six .debs for direct download
+  # =====================================================================
+  release:
+    name: Publish Nightly Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # Needed to move tags
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: List collected .deb files
+        run: ls -la artifacts/
+
+      - name: Force-move nightly tag to current commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly
+          git push -f origin nightly
+
+      # The nightly release accumulates one dated set of six .debs per run: the
+      # build date is baked into each filename (insomnia_0.1.0~nightlyYYYYMMDD-...),
+      # so old names are never overwritten by the publish step below and pile up
+      # 6-per-day. Delete every existing asset first so only the freshly-built six
+      # remain. Tolerate the first run, when no nightly release exists yet.
+      - name: Remove stale .deb assets from nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view nightly --json assets --jq '.assets[].name' 2>/dev/null \
+            | while read -r asset; do
+                echo "Deleting stale asset: $asset"
+                gh release delete-asset nightly "$asset" --yes
+              done || echo "No existing nightly release yet; nothing to clean."
+
+      # The nightly body carries only the source commit and the download table.
+      # The changes summary rendered from CHANGELOG.yaml is reserved for
+      # versioned releases (release.yaml); the in-progress entry is not
+      # previewed here.
+      - name: Build nightly release notes
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "Nightly build from commit ${SHA}"
+            cat <<'EOF'
+
+          ## Downloads
+
+          Choose the file matching your Ubuntu version and architecture:
+
+          | Ubuntu             | x86_64                   | ARM64                    |
+          |--------------------|--------------------------|--------------------------|
+          | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
+          | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
+          | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
+          EOF
+          } > release-notes.md
+          echo "----- rendered release-notes.md -----"
+          cat release-notes.md
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: nightly
+          name: "Nightly Build"
+          prerelease: true
+          body_path: release-notes.md
+          files: artifacts/*.deb
+
+  # =====================================================================
+  # Per-codename insomnia-nightly-<codename> flat APT repositories
+  # =====================================================================
+  publish-apt:
+    name: Publish nightly APT repo
+    needs: build
+    if: ${{ vars.APT_PUBLISH_ENABLED == 'true' }}
+    uses: ./.github/workflows/publish-apt.yaml
+    with:
+      channel: insomnia-nightly
+      prerelease: true
+    secrets: inherit

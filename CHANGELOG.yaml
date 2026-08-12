@@ -1,0 +1,36 @@
+# CHANGELOG.yaml – the single source of truth for the project changelog.
+# Two consumers render from this one file, so there is no second place to edit:
+#   * packaging/changelog-gen.sh -> the Debian-format changelog cargo-deb ships
+#     (see Cargo.toml [package.metadata.deb] changelog)
+#   * packaging/release-notes.sh -> the GitHub release body (nightly.yaml uses
+#     the top entry; release.yaml uses the entry matching the v<X.Y.Z> tag)
+# The note bodies below are written in Markdown (### headings, * bullets) so
+# they render directly on the GitHub Releases page.
+# Keep newest entry first.
+# All timestamps must be in full ISO-8601 format.
+# Fields "distribution" and "urgency" are optional per-entry; if you omit them,
+# changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
+
+- semver: 0.1.0
+  date: 2026-08-12T12:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Initial release
+        * insomnia is the out-of-process firewall / IPsec enforcement
+          daemon for zebra-rs, split out of the zebra-rs tree: zebra-rs
+          owns the configuration (YANG schema, candidate/running
+          stores, commit); insomnia enforces it
+        * Subscribes to the `firewall` and `vpn ipsec` running-config
+          subtrees over the zebra.config.v1 gRPC API and renders them
+          into nftables (`nft -f -`, one atomic transaction per
+          commit) and strongSwan swanctl state (`swanctl -q`)
+        * Registers as the zebra.show.v1 provider for both trees, so
+          `show firewall` and `show vpn ipsec …` on the zebra-rs CLI
+          are answered here (IPsec state read from charon's VICI
+          socket)
+        * Every connection retries forever: zebra-rs restarting is a
+          normal condition, and the subscription's snapshot-first
+          contract makes reconnection self-resynchronizing
