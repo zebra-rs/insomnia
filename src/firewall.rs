@@ -582,7 +582,11 @@ fn group_references(cfg: &FirewallConfig, kind: &str, name: &str) -> usize {
     count
 }
 
-fn group_kinds(groups: &Groups) -> [(&'static str, &Vec<Group>, fn(&Group) -> &Vec<Flex>); 7] {
+/// One group table: the config kind string, the configured groups of that
+/// kind, and the accessor for a group's member list.
+type GroupKind<'a> = (&'static str, &'a Vec<Group>, fn(&Group) -> &Vec<Flex>);
+
+fn group_kinds(groups: &Groups) -> [GroupKind<'_>; 7] {
     [
         ("address-group", &groups.address_group, |g| &g.address),
         ("ipv6-address-group", &groups.ipv6_address_group, |g| {
