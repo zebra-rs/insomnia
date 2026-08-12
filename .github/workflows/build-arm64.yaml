@@ -1,0 +1,30 @@
+name: Build for arm64
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for arm64
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build .deb
+        run: |
+          sudo apt update -y
+          sudo apt install -y protobuf-compiler
+          cargo install cargo-deb --locked
+          make -C packaging arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: insomnia-arm64
+          path: |
+            ./packaging/*.deb

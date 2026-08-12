@@ -1,9 +1,13 @@
 [package]
 name = "insomnia"
+# Kept in sync with the top-level `version` file by packaging/version-update.sh;
+# cargo-deb reads the package version from here.
 version = "0.1.0"
 edition = "2024"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
 description = "Out-of-process firewall / IPsec enforcement daemon for zebra-rs"
-license = "AGPL-3.0-only"
+license = "AGPL-3.0-or-later"
+homepage = "https://zebra.rs"
 
 [dependencies]
 anyhow = "1.0"
@@ -24,3 +28,54 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
+
+# Debian packaging (cargo-deb). `cargo deb` reads this table; the version
+# comes straight from `version` above (kept in sync with the top-level
+# `version` file by packaging/version-update.sh). The packaging Makefile
+# (packaging/Makefile) drives the build.
+[package.metadata.deb]
+maintainer = "Kunihiro Ishiguro <kunihiro@zebra.rs>"
+section = "net"
+priority = "optional"
+# Automatic shared-library Depends via dpkg-shlibdeps over the built binary,
+# plus nftables: the firewall backend renders rulesets and applies them
+# atomically with `nft -f -`.
+depends = "$auto, nftables"
+# The IPsec backend renders /etc/swanctl/swanctl.conf and drives strongSwan
+# through `swanctl -q` and charon's VICI socket. Recommends rather than
+# Depends: the firewall half works fine without strongSwan installed.
+recommends = "strongswan-swanctl, charon-systemd"
+# The whole point of this daemon is enforcing zebra-rs's firewall/vpn config,
+# but it can run on a different host than zebra-rs (tcp://HOST:PORT), so the
+# zebra-rs package itself is only suggested.
+suggests = "zebra-rs"
+# Drop the default `-1` revision so the artifact stays insomnia_<ver>_<arch>.deb
+# (the CI dist-suffix rename in build-debs.yaml expects that shape).
+revision = ""
+# Debian-format changelog generated from the single-source CHANGELOG.yaml by
+# packaging/changelog-gen.sh (the packaging Makefile runs it before cargo deb).
+changelog = "packaging/out/changelog"
+extended-description = """
+insomnia is the out-of-process firewall / IPsec enforcement daemon for
+zebra-rs. zebra-rs owns the configuration (YANG schema, candidate/running
+stores, commit); insomnia subscribes to the `firewall` and `vpn ipsec`
+running-config subtrees over gRPC and renders them into nftables and
+strongSwan (swanctl) state, and answers `show firewall` / `show vpn ipsec`
+on the zebra-rs CLI as the show provider for both trees."""
+# Custom maintainer scripts; each carries a #DEBHELPER# token where cargo-deb
+# injects the generated systemd fragments.
+maintainer-scripts = "packaging/maintainer"
+assets = [
+  ["target/release/insomnia", "usr/bin/", "755"],
+]
+
+# systemd unit install/enable/start with restart-after-upgrade. cargo-deb
+# adds packaging/systemd/insomnia.service as an asset and injects the
+# enable/start/restart/stop fragments at the #DEBHELPER# token in the
+# maintainer scripts. The unit runs a bare `insomnia`; the default --host
+# (unix:zebra-rs/vty), --swanctl-dir (/etc/swanctl) and --vici-socket
+# (/var/run/charon.vici) resolve a same-host install without flags.
+[package.metadata.deb.systemd-units]
+unit-name = "insomnia"
+unit-scripts = "packaging/systemd"
+restart-after-upgrade = true

@@ -1,0 +1,149 @@
+name: Build .deb (reusable)
+
+# Reusable build of all six .deb variants (jammy/noble/resolute x amd64/arm64).
+# Called by nightly.yaml (nightly: true) and release.yaml (nightly: false).
+# Each matrix leg uploads an artifact named `deb-<dist>-<arch>`.
+
+on:
+  workflow_call:
+    inputs:
+      nightly:
+        description: "Stamp a ~nightlyYYYYMMDD version so apt upgrade advances daily"
+        type: boolean
+        default: false
+
+# Pin cargo-deb so packaging output moves only when we choose to move it; a
+# bump is a deliberate, reviewable change. (In zebra-rs an unpinned
+# `cargo install` silently picked up a 3.x asset-glob behavior change and
+# altered the built package with no commit behind it — same framework, same
+# pin.) Keep this in step with zebra-rs's CARGO_DEB_VERSION when bumping.
+env:
+  CARGO_DEB_VERSION: "3.7.0"
+
+jobs:
+  # =====================================================================
+  # Native runners: Ubuntu 22.04 and 24.04
+  # =====================================================================
+  build-native:
+    name: Build ${{ matrix.dist }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { dist: jammy, arch: amd64, runner: ubuntu-22.04 }
+          - { dist: jammy, arch: arm64, runner: ubuntu-22.04-arm }
+          - { dist: noble, arch: amd64, runner: ubuntu-24.04 }
+          - { dist: noble, arch: arm64, runner: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-key: ${{ matrix.dist }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
+
+      # Nightly packages need a monotonically increasing, pre-release-sorting
+      # version or `apt upgrade` never advances. 0.1.0~nightlyYYYYMMDD sorts
+      # BELOW a future stable 0.1.0 (Debian '~'). cargo-deb takes the version
+      # verbatim via --deb-version (the packaging Makefile forwards DEB_VERSION),
+      # so the '~' is preserved. Skipped for stable releases, which use the
+      # clean version from Cargo.toml.
+      - name: Compute nightly package version
+        if: ${{ inputs.nightly }}
+        run: |
+          STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
+          echo "DEB_VERSION=$STAMP" >> "$GITHUB_ENV"
+          echo "Nightly package version: $STAMP"
+
+      - name: Build .deb
+        run: make -C packaging ${{ matrix.arch }}
+
+      - name: Rename .deb with dist suffix
+        run: |
+          cd packaging
+          for f in *.deb; do
+            # insomnia_0.1.0_arm64.deb -> insomnia_0.1.0-noble_arm64.deb
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-${{ matrix.dist }}_\2.deb/")
+            mv "$f" "$new"
+          done
+          ls -la *.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.dist }}-${{ matrix.arch }}
+          path: ./packaging/*.deb
+
+  # =====================================================================
+  # Container-based: Ubuntu 26.04 (until native runners are available)
+  # https://github.com/actions/runner-images/issues/13964
+  # =====================================================================
+  build-container:
+    name: Build resolute-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:26.04
+
+    steps:
+      - name: Install container base tools
+        run: |
+          apt-get update
+          apt-get install -y curl git ca-certificates sudo build-essential pkg-config
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -y
+          apt-get install -y protobuf-compiler
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
+
+      - name: Compute nightly package version
+        if: ${{ inputs.nightly }}
+        run: |
+          STAMP="$(cat version)~nightly$(date -u +%Y%m%d)"
+          echo "DEB_VERSION=$STAMP" >> "$GITHUB_ENV"
+          echo "Nightly package version: $STAMP"
+
+      - name: Build .deb
+        run: make -C packaging ${{ matrix.arch }}
+
+      - name: Rename .deb with dist suffix
+        run: |
+          cd packaging
+          for f in *.deb; do
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-resolute_\2.deb/")
+            mv "$f" "$new"
+          done
+          ls -la *.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-resolute-${{ matrix.arch }}
+          path: ./packaging/*.deb
