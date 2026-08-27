@@ -39,7 +39,7 @@ jobs:
         with:
           components: clippy
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: cargo test
@@ -54,4 +54,8 @@ jobs:
       - name: Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Test
-        run: cargo test
+        # The bdd crate's cucumber tests require root + Linux network
+        # namespaces (and a zebra-rs toolchain) and are not runnable in
+        # the GitHub Actions sandbox; exclude them here. They are run
+        # locally through bdd/Makefile.
+        run: cargo test --workspace --exclude bdd

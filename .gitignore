@@ -1,2 +1,11 @@
 /target
 book/book/
+
+# bdd — run artifacts (daemon/charon/insomnia logs, Allure output) and the
+# per-worktree staged toolchain (make -C bdd stage)
+/bdd/logs/
+/bdd/allure-report/
+/bdd/allure-results/
+/bdd/.allure/
+/bdd/.stage/
+/bdd/.stage.tmp/
