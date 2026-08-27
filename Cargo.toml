@@ -29,6 +29,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [build-dependencies]
 tonic-prost-build = "0.14"
 
+# The BDD harness (bdd/) is a workspace member so one `cargo` invocation
+# covers both; its cucumber test needs root + network namespaces and is run
+# through bdd/Makefile, never by CI (`cargo test --workspace --exclude bdd`).
+[workspace]
+members = ["bdd"]
+
+# Workspace-wide clippy configuration, inherited via `[lints] workspace =
+# true` (the same set zebra-rs uses, so the shared harness sources lint
+# identically in both repositories).
+[workspace.lints.clippy]
+upper_case_acronyms = "allow"
+let_underscore_future = "allow"
+result_large_err = "allow"
+large_enum_variant = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+len_without_is_empty = "allow"
+
 # Debian packaging (cargo-deb). `cargo deb` reads this table; the version
 # comes straight from `version` above (kept in sync with the top-level
 # `version` file by packaging/version-update.sh). The packaging Makefile
