@@ -39,6 +39,7 @@
   - [Unicast VRRP, Virtual MAC and Authentication](ch-05-02-unicast-and-authentication.md)
   - [Health Checks, Tracking and Sync Groups](ch-05-03-health-checks-and-sync-groups.md)
   - [How insomnia Drives keepalived](ch-05-04-keepalived-and-insomnia.md)
+  - [Sample Configurations](ch-05-05-sample-configurations.md)
 
 ## Show Commands
 

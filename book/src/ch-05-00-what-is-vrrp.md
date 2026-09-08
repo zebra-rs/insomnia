@@ -95,4 +95,6 @@ vrrp
 
 A minimal working configuration is one group: an interface, a VRID and
 a virtual address. The next chapter builds exactly that on a pair of
-routers.
+routers; [Sample Configurations](ch-05-05-sample-configurations.md)
+collects five complete setups, from that pair to an edge router with a
+sync group, each with the keepalived configuration insomnia renders.
