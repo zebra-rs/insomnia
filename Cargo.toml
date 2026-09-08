@@ -23,6 +23,8 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# kill(2) for keepalived reload / JSON-dump signals and pid liveness.
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
