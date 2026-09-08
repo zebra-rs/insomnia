@@ -1,0 +1,26 @@
+[Unit]
+Description=keepalived (VRRP) for VRF %i, driven by insomnia
+Documentation=man:keepalived(8) man:keepalived.conf(5)
+# insomnia renders /run/insomnia/vrrp/%i/keepalived.conf and starts,
+# reloads or stops this instance through systemctl; the unit is never
+# enabled on its own. Instance `default` serves the global routing table.
+After=network-online.target insomnia.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+# keepalived writes its dump files (keepalived.json for `show vrrp`,
+# .data, .stats) under TMPDIR; keep them inside the instance directory,
+# away from any distribution keepalived's /tmp/keepalived.json.
+Environment=TMPDIR=/run/insomnia/vrrp/%i
+# Empty for `default`; LD_PRELOAD=<vrf shim> and VRF=<name> for VRF
+# instances (written by insomnia).
+EnvironmentFile=-/run/insomnia/vrrp/%i/env
+ExecStart=/usr/sbin/keepalived --dont-fork \
+    --use-file /run/insomnia/vrrp/%i/keepalived.conf \
+    --pid /run/insomnia/vrrp/%i/keepalived.pid \
+    --vrrp_pid /run/insomnia/vrrp/%i/keepalived_vrrp.pid \
+    --checkers_pid /run/insomnia/vrrp/%i/keepalived_checkers.pid
+ExecReload=/bin/kill -HUP $MAINPID
+# Notify scripts keepalived spawned must not be killed with it.
+KillMode=process

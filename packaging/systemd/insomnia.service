@@ -1,5 +1,5 @@
 [Unit]
-Description=insomnia — firewall / IPsec enforcement daemon for zebra-rs
+Description=insomnia — firewall / IPsec / VRRP enforcement daemon for zebra-rs
 # Ordering only, not a requirement: insomnia retries the zebra-rs gRPC and
 # charon VICI connections forever, so it may start before (or without) either.
 After=network.target zebra-rs.service strongswan.service
@@ -12,6 +12,12 @@ StandardOutput=journal
 StandardError=journal
 ExecStart=/usr/bin/insomnia
 Restart=always
+# /run/insomnia/vrrp/<instance>/ holds each keepalived instance's config,
+# pid files and dump files. Preserve it across insomnia restarts: the
+# keepalived instances keep running (a package upgrade must not fail
+# over the VRRP master) and still reference those paths.
+RuntimeDirectory=insomnia
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target

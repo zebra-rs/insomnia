@@ -24,6 +24,7 @@ for zebra-rs reads the same in insomnia.
   insomnia depends on.
 - For the IPsec features: `charon-systemd` and `strongswan-swanctl`
   (`apt install charon-systemd strongswan-swanctl`).
+- For the VRRP features: `keepalived` (`apt install keepalived`).
 - Optional: the `allure` CLI to browse the HTML report.
 
 ## Staging the toolchain
@@ -75,6 +76,7 @@ inspection (`BDD_KEEP=1 make -C bdd ipsec_s2s`); the next run's
 - `bdd/logs/<feature>_<node>.log` — the zebra-rs daemon log of each node.
 - `bdd/logs/<feature>_<node>.insomnia.log` — insomnia's log for that node.
 - `bdd/logs/<feature>_<node>.charon.log` — strongSwan's log (IPsec features).
+- `bdd/logs/<feature>_<node>.keepalived.log` — keepalived's log (VRRP features).
 - `bdd/logs/<feature>.cucumber.log` — the per-feature step report when
   features run concurrently (serial runs print to the terminal).
 - `bdd/allure-results/` — one JSON result per feature for the Allure report.
@@ -105,3 +107,4 @@ on one host. Configuration files live under
 | Feature | Tag | What it proves |
 |:--------|:----|:---------------|
 | Site-to-site IPsec | `@ipsec_s2s` | Two nodes, IKEv2 + PSK, one policy-based tunnel: insomnia renders and loads the swanctl configuration, the IKE and CHILD SAs come up with the configured proposals, ESP traffic flows and the counters move, `show vpn ipsec sa/state/policy/connections` read live state, and deleting the config unloads the tunnel. |
+| VRRP master/backup pair | `@vrrp_pair` | Two routers and a client on a bridge, one group with VRID 10: insomnia renders and loads the keepalived configuration, the higher priority becomes MASTER and holds the virtual address, the client reaches it, a link failure fails over to the backup and the master preempts when the link returns, `show vrrp` / `detail` / `statistics` read live state, and deleting the config withdraws the address. |

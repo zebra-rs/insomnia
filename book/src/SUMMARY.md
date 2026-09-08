@@ -32,10 +32,19 @@
   - [Dead Peer Detection](ch-02-07-dead-peer-detection.md)
   - [NAT Traversal](ch-02-08-nat-traversal.md)
 
+## VRRP
+
+- [VRRP](ch-05-00-what-is-vrrp.md)
+  - [VRRP Groups](ch-05-01-vrrp-groups.md)
+  - [Unicast VRRP, Virtual MAC and Authentication](ch-05-02-unicast-and-authentication.md)
+  - [Health Checks, Tracking and Sync Groups](ch-05-03-health-checks-and-sync-groups.md)
+  - [How insomnia Drives keepalived](ch-05-04-keepalived-and-insomnia.md)
+
 ## Show Commands
 
 - [Firewall](ch-03-00-show-firewall.md)
 - [IPsec](ch-03-01-show-ipsec.md)
+- [VRRP](ch-03-02-show-vrrp.md)
 
 ## Testing
 

@@ -81,6 +81,13 @@ ipsec_s2s:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@ipsec_s2s"
 
+# VRRP master/backup pair: requires keepalived installed on the host
+# (apt install keepalived) — see the feature header and
+# tests/scripts/vrrp_node.sh.
+vrrp_pair:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@vrrp_pair"
+
 generate:
 	rm -rf allure-report
 	allure generate
@@ -115,4 +122,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ipsec_s2s generate open docs FORCE
+.PHONY: all run ipsec_s2s vrrp_pair generate open docs FORCE

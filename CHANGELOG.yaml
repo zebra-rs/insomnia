@@ -11,6 +11,30 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 0.2.0
+  date: 2026-09-07T20:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### VRRP backend on keepalived
+        * New `vrrp` config subtree (VyOS-derived `high-availability vrrp`
+          with the wrapper dropped): groups, sync-groups and
+          global-parameters render into keepalived.conf line for line
+          after the VyOS template, plus three extensions keepalived
+          supports but VyOS does not expose — per-group `version`,
+          `v3-checksum-as-v2`, fractional `advertise-interval`
+        * keepalived runs as a separately supervised instance per VRF
+          (`insomnia-keepalived@<vrf>.service`, `default` for the global
+          table) under /run/insomnia/vrrp/<vrf>/; insomnia writes the file
+          and reloads or stops the unit — or SIGHUPs a pid file with
+          `--keepalived-control signal` on hosts without systemd
+        * `show vrrp`, `show vrrp statistics [group NAME]` and
+          `show vrrp detail [group NAME]` answered from keepalived's JSON
+          dump, in the VyOS layouts; disabled groups listed as DISABLED
+        * Recommends keepalived; the firewall and IPsec halves are
+          unchanged
 - semver: 0.1.0
   date: 2026-08-12T12:00:00+09:00
   distribution: unstable
