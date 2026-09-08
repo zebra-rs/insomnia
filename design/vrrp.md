@@ -1,6 +1,8 @@
 # VRRP (VyOS-derived `vrrp` tree) — design
 
-Status: proposal, 2026-09-07. Nothing implemented yet.
+Status: implemented for the default VRF on 2026-09-07 (insomnia branch
+`vrrp-backend`, zebra-rs branch `vrrp`; BDD feature `vrrp_pair` green). The
+per-VRF expansion in §13 remains a proposal.
 
 insomnia gains a third backend next to firewall and IPsec: it subscribes to the
 `vrrp` running-config subtree, renders it into a `keepalived.conf`,
@@ -358,7 +360,11 @@ Packaging:
   Type=notify
   Environment=TMPDIR=/run/insomnia/vrrp/%i
   EnvironmentFile=-/run/insomnia/vrrp/%i/env
-  ExecStart=/usr/sbin/keepalived --dont-fork --use-file /run/insomnia/vrrp/%i/keepalived.conf --pid /run/insomnia/vrrp/%i/keepalived.pid
+  ExecStart=/usr/sbin/keepalived --dont-fork \
+      --use-file /run/insomnia/vrrp/%i/keepalived.conf \
+      --pid /run/insomnia/vrrp/%i/keepalived.pid \
+      --vrrp_pid /run/insomnia/vrrp/%i/keepalived_vrrp.pid \
+      --checkers_pid /run/insomnia/vrrp/%i/keepalived_checkers.pid
   ExecReload=/bin/kill -HUP $MAINPID
   KillMode=process
   ```
@@ -366,7 +372,9 @@ Packaging:
   `TMPDIR` moves keepalived's fixed-name dump files (`keepalived.json`,
   `.data`, `.stats`) into the instance directory — keepalived honours it
   (`set_tmp_dir`, `lib/utils.c`) — which also keeps them clear of a
-  distribution keepalived's `/tmp/keepalived.json`. The unit is not enabled;
+  distribution keepalived's `/tmp/keepalived.json`. The child pid files are
+  named explicitly for the same reason: keepalived's defaults for them are
+  global `/run` names. The unit is not enabled;
   insomnia starts `insomnia-keepalived@default` on the first non-empty config
   (`reload-or-restart` starts a stopped unit) and stops it when the config goes
   away. Whether cargo-deb's `unit-name` matching handles a template unit is to
@@ -478,7 +486,9 @@ Scenarios:
    no data.
 5. Teardown, asserting a clean environment.
 
-`vrrp_node.sh` follows `ipsec_node.sh`: `unshare -m`, tmpfs over `/run`, then
+`vrrp_node.sh` follows `ipsec_node.sh`: `unshare -m`, tmpfs over `/run` and
+over `/etc/swanctl` (insomnia's IPsec backend renders there on every snapshot
+and must never touch the host's strongSwan config), then
 start keepalived on an empty `/run/insomnia/vrrp/default/keepalived.conf` with
 `TMPDIR=/run/insomnia/vrrp/default` (`--dont-fork --use-file … --pid
 …/keepalived.pid --log-console`, log bind-mounted to
