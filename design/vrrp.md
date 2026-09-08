@@ -139,7 +139,7 @@ In scope for the first release:
 - `show vrrp`, `show vrrp statistics`, `show vrrp detail`, each with an optional
   group filter, text and JSON
 
-Deliberately deferred (§13): `virtual-server` (IPVS load balancing, not VRRP;
+Deliberately deferred (§14): `virtual-server` (IPVS load balancing, not VRRP;
 would be its own top-level node),
 `vrrp snmp trap`, the conntrack-sync failover hook, commit-time reference
 validation.
@@ -217,7 +217,8 @@ vrrp
 Schema conventions carried over from ipsec.yang: no `pattern` on value leaves,
 `description` uses the rest-of-line pattern, references (`member`, `interface`)
 are plain strings rather than leafrefs so referents may be staged after
-referrers.
+referrers. A `vrf` list reusing the same grouping is planned for per-VRF
+operation; see §13.
 
 ## 5. Backend shape (insomnia `src/vrrp.rs`)
 
@@ -313,53 +314,64 @@ rejected because insomnia is restarted on every package upgrade
 failover for a config-daemon restart. Keeping keepalived independent means
 insomnia restarts never move a virtual address.
 
-Files and flags (defaults in parentheses):
+Files and flags. The layout is one directory per keepalived *instance*, named
+after the VRF, from the first release — so the per-VRF expansion in §13 adds
+no path changes. The first release only ever creates `default`.
 
 | Flag | Default | Meaning |
 |:-----|:--------|:--------|
-| `--keepalived-conf` | `/run/insomnia/keepalived.conf` | rendered file; written to a temp file in the same directory and renamed into place |
-| `--keepalived-pid` | `/run/insomnia/keepalived.pid` | keepalived parent pid file; used by signal mode and by `show vrrp` |
-| `--keepalived-json` | `/tmp/keepalived.json` | where keepalived writes its JSON dump (keepalived's tmp dir + fixed name) |
+| `--keepalived-dir` | `/run/insomnia/vrrp` | `<dir>/<vrf>/keepalived.conf` (rendered; temp file + rename, mode 0600), `keepalived.pid` (parent pid; signal mode and `show vrrp`), `keepalived.json` (keepalived's dump, placed here through `TMPDIR`), `env` (per-instance environment, empty for `default`, §13) |
 | `--keepalived-control` | `systemd` | `systemd` or `signal` |
-| `--keepalived-unit` | `insomnia-keepalived.service` | unit used in systemd mode |
+| `--keepalived-unit` | `insomnia-keepalived@.service` | template unit; the instance name is the VRF (`default` for the global table) |
+| `--vrf-preload` | `/usr/lib/insomnia/vrf.o` | `LD_PRELOAD` shim written into non-default instances' `env` (§13) |
 
 Control modes:
 
 - **`systemd`** (production): after writing the file run
-  `systemctl reload-or-restart <unit>`; when the tree is empty or `disable` is
-  set, write an empty file and run `systemctl stop <unit>`. A failing
-  `systemctl` is logged and the commit still succeeds, exactly like a missing
-  `swanctl` today.
+  `systemctl reload-or-restart insomnia-keepalived@<vrf>`; when the subtree is
+  empty or `disable` is set, write an empty file and run
+  `systemctl stop insomnia-keepalived@<vrf>`. A failing `systemctl` is logged
+  and the commit still succeeds, exactly like a missing `swanctl` today.
 - **`signal`** (containers, BDD, anyone running keepalived by hand): after
-  writing the file send `SIGHUP` to the pid in the pid file; on an empty tree
-  write the empty file and `SIGHUP` as well, so keepalived withdraws every
-  instance but keeps running. If the pid file is absent or stale, warn and
-  leave the file for the next start.
+  writing the file send `SIGHUP` to the pid in that instance's pid file; on an
+  empty subtree write the empty file and `SIGHUP` as well, so keepalived
+  withdraws every instance but keeps running. If the pid file is absent or
+  stale, warn and leave the file for the next start.
+- In both modes the new render is compared with the file already in place;
+  an unchanged instance is not reloaded.
 
 Packaging:
 
 - `Recommends: keepalived` (like strongSwan; the other backends work without
   it).
-- Ship `packaging/systemd/insomnia-keepalived.service`, **a separate unit**, so
-  the distribution's `keepalived.service` and `/etc/keepalived/keepalived.conf`
-  are never touched:
+- Ship `packaging/systemd/insomnia-keepalived@.service`, **a separate template
+  unit**, so the distribution's `keepalived.service` and
+  `/etc/keepalived/keepalived.conf` are never touched:
 
   ```ini
   [Unit]
-  Description=keepalived (VRRP) driven by insomnia
+  Description=keepalived (VRRP) for VRF %i, driven by insomnia
   After=network-online.target insomnia.service
   Wants=network-online.target
 
   [Service]
   Type=notify
-  ExecStart=/usr/sbin/keepalived --dont-fork --use-file /run/insomnia/keepalived.conf --pid /run/insomnia/keepalived.pid
+  Environment=TMPDIR=/run/insomnia/vrrp/%i
+  EnvironmentFile=-/run/insomnia/vrrp/%i/env
+  ExecStart=/usr/sbin/keepalived --dont-fork --use-file /run/insomnia/vrrp/%i/keepalived.conf --pid /run/insomnia/vrrp/%i/keepalived.pid
   ExecReload=/bin/kill -HUP $MAINPID
   KillMode=process
   ```
 
-  It is not enabled; insomnia starts it on the first non-empty config
+  `TMPDIR` moves keepalived's fixed-name dump files (`keepalived.json`,
+  `.data`, `.stats`) into the instance directory — keepalived honours it
+  (`set_tmp_dir`, `lib/utils.c`) — which also keeps them clear of a
+  distribution keepalived's `/tmp/keepalived.json`. The unit is not enabled;
+  insomnia starts `insomnia-keepalived@default` on the first non-empty config
   (`reload-or-restart` starts a stopped unit) and stops it when the config goes
-  away.
+  away. Whether cargo-deb's `unit-name` matching handles a template unit is to
+  be verified in the packaging step; the fallback is a plain asset under
+  `/usr/lib/systemd/system/`.
 - `insomnia.service` gains `RuntimeDirectory=insomnia` and
   `RuntimeDirectoryPreserve=yes` so `/run/insomnia` survives insomnia restarts
   while keepalived is still using the file and pid path.
@@ -382,9 +394,9 @@ Orders reach insomnia as `/show/vrrp`, `/show/vrrp/statistics`,
 
 Data source, following `vyos/ifconfig/vrrp.py`:
 
-1. Read the pid from `--keepalived-pid`. No pid or no process → answer
+1. Read the pid from the instance's `keepalived.pid`. No pid or no process → answer
    `VRRP data is not available (process not running or no active groups)`.
-2. Remove a stale `--keepalived-json` file.
+2. Remove a stale `keepalived.json` from the instance directory.
 3. Send the JSON signal. The number comes from `keepalived --signum=JSON`,
    probed once at startup (fallback `SIGRTMIN+2`), never hard-coded.
 4. Poll for the file to appear and its size to stop changing (keepalived writes
@@ -424,7 +436,8 @@ Two small PRs (may land as one):
    `[ext]` leaves from §2); presence tests next to the firewall and
    ipsec ones in `config/manager.rs` (`shipped_tree(&["iso"])`).
 2. **Show grammar and routing** — the three commands in `exec.yang` under
-   `if-feature feat:iso`; `is_vrrp()` in `config/manager.rs` returning `"vrrp"`
+   `if-feature feat:iso`, declared through a grouping so §13's per-VRF form
+   reuses them; `is_vrrp()` in `config/manager.rs` returning `"vrrp"`
    from `show_proto()` and `"VRRP"` in the not-running fallback; a routing unit
    test like the existing `"firewall"` / `"ipsec"` ones.
 
@@ -465,14 +478,15 @@ Scenarios:
    no data.
 5. Teardown, asserting a clean environment.
 
-`vrrp_node.sh` follows `ipsec_node.sh`: `unshare -m`, tmpfs over `/run`
-**and `/tmp`**, then start keepalived on an empty `/run/insomnia/keepalived.conf`
-(`--dont-fork --use-file … --pid /run/insomnia/keepalived.pid --log-console`,
-log bind-mounted to `logs/<ns>.keepalived.log`), zebra-rs with `--feature iso`,
-and insomnia with `--keepalived-control signal`. The private `/run` and `/tmp`
-keep each node's pid file and JSON dump apart from each other and from the
-keepalived service already running on the development host; signal mode means
-no node ever calls `systemctl`.
+`vrrp_node.sh` follows `ipsec_node.sh`: `unshare -m`, tmpfs over `/run`, then
+start keepalived on an empty `/run/insomnia/vrrp/default/keepalived.conf` with
+`TMPDIR=/run/insomnia/vrrp/default` (`--dont-fork --use-file … --pid
+…/keepalived.pid --log-console`, log bind-mounted to
+`logs/<ns>.keepalived.log`), zebra-rs with `--feature iso`, and insomnia with
+`--keepalived-control signal`. The private `/run` keeps each node's pid file
+and JSON dump apart from each other and from the keepalived service already
+running on the development host; signal mode means no node ever calls
+`systemctl`.
 
 Existing steps cover almost everything (`I spawn … in namespace`, `show command
 … should eventually contain`, `ping from … should eventually succeed`,
@@ -493,7 +507,7 @@ In order; each item is one PR on its own branch.
 | 2 | zebra-rs | `vrrp-show` | §9 item 2 |
 | 3 | insomnia | `vrrp-backend` | `src/vrrp.rs` model + renderer + golden tests, apply with both control modes, `main.rs` flags, provider name, startup probes |
 | 4 | insomnia | `vrrp-show` | JSON collect + the three renderers + fixture tests |
-| 5 | insomnia | `vrrp-packaging` | `Recommends`, `insomnia-keepalived.service`, `RuntimeDirectory`, CHANGELOG entry |
+| 5 | insomnia | `vrrp-packaging` | `Recommends`, `insomnia-keepalived@.service` template unit, `RuntimeDirectory`, CHANGELOG entry |
 | 6 | insomnia | `vrrp-bdd` | feature, configs, `vrrp_node.sh`, Makefile target, docs page |
 | 7 | insomnia | `vrrp-docs` | book chapters (VRRP concepts, `show vrrp`), CLAUDE.md third-backend notes |
 
@@ -508,14 +522,132 @@ against the host keepalived:
 - keepalived started on an **empty** `--use-file` idles; a `SIGHUP` after
   adding a `vrrp_instance` starts the VRRP child; a `SIGHUP` after removing it
   withdraws the VIP and returns to idle. (Source reading says yes; confirm.)
-- The JSON signal produces `/tmp/keepalived.json` in the node's private `/tmp`
-  and the file is complete when it first appears (decides the wait strategy).
+- The JSON signal produces `keepalived.json` in the instance directory when
+  `TMPDIR` points there, and the file is complete when it first appears
+  (decides the wait strategy).
 - `use_vmac` creates the macvlan on a veth inside a namespace and the VIP
   answers ARP through it.
 - Two nodes on a Linux bridge see each other's multicast advertisements
   (224.0.0.18 is link-local and always flooded; confirm with snooping enabled).
 
-## 13. Deferred, with reasons
+## 13. Running VRRP in a VRF (future expansion)
+
+Not in the first release, but the first release is laid out so that adding it
+changes no paths and no plumbing. Decision (2026-09-07): **one keepalived
+process per VRF, launched under an `LD_PRELOAD` shim** that binds every socket
+the process creates to the VRF device before `bind()` / `connect()`. keepalived
+is not relied on to be VRF-aware. (keepalived 2.2.8 does carry partial VRF
+handling — it enslaves a VMAC it creates to the parent's VRF master and binds
+source-bound unicast sockets to the VRF, `vrrp_vmac.c` / `vrrp.c` — but that is
+incidental; the shim makes the whole process VRF-local regardless.)
+
+### Mechanism
+
+- **The shim, `vrf.o`.** A small preload library, still to be written (nothing
+  in the workspace provides it today). It wraps `socket()` / `bind()` /
+  `connect()` and applies `SO_BINDTODEVICE` with the VRF device named by an
+  environment variable (`VRF=<name>`). One hard requirement: it must **not
+  override a device the process already bound** with `SO_BINDTODEVICE`.
+  keepalived binds its advertisement sockets to the member interface itself;
+  the shim only has to catch the sockets keepalived binds by address (unicast
+  source, health checks). `ip vrf exec` achieves the same through a cgroup BPF
+  hook; the preload was chosen because it needs no cgroup/BPF setup and works
+  identically inside the BDD namespaces.
+- **Inheritance.** Health-check and transition scripts are children of
+  keepalived and inherit `LD_PRELOAD` / `VRF`, so a `ping` health check runs
+  in the VRF with no `ip vrf exec` wrapping in the rendered config. Caveat to
+  verify: `ping` carries `cap_net_raw=ep`, and the loader drops `LD_PRELOAD`
+  under secure-execution, which applies when an exec raises privileges.
+  keepalived runs scripts as root (`script_user root`), so no raise occurs and
+  the preload should survive; if it does not, the renderer wraps `ping` in
+  `ip vrf exec <vrf>`.
+- **One process per VRF.** VRF is not a network namespace, so nothing forces
+  a process split; it is chosen because the shim's binding is process-wide,
+  and because it keeps each keepalived's sockets, pid file, JSON dump and
+  reload blast radius per VRF. keepalived's fixed file names are kept apart
+  per instance through `TMPDIR` (honoured by `set_tmp_dir`, `lib/utils.c`) and
+  explicit `--pid` paths — exactly the §7 layout.
+
+### Config tree
+
+Follow zebra-rs's `router <proto> vrf <name>` convention: a `vrf` list under
+`vrrp` that reuses the same grouping as the default tree.
+
+```yang
+container vrrp {
+  if-feature feat:iso;
+  uses "vrrp:vrrp";                    // default VRF
+  list vrf {
+    key name;
+    leaf name { ext:dynamic "rib:vrf"; type string; }   // plain string, staging-friendly
+    uses "vrrp:vrrp";                  // same group / sync-group / global-parameters / disable
+  }
+}
+```
+
+`set vrrp vrf red group WAN interface eth1 …` therefore mirrors the default
+spelling exactly. There is no `vrf` leaf on the group: the enclosing list is
+the VRF. The group's `interface` must be enslaved to that VRF
+(`interface eth1 vrf red`, which the zebra-rs RIB applies before addresses);
+the renderer warns when a per-address `interface` names a device that is not,
+and commit-time cross-checking stays with the shared validation follow-up.
+
+### Rendering and applying
+
+- Each `vrrp vrf <name>` subtree renders to its own
+  `/run/insomnia/vrrp/<name>/keepalived.conf` with the same renderer as the
+  default tree — the render function takes a subtree, not the whole config.
+- insomnia writes `/run/insomnia/vrrp/<name>/env` containing
+  `LD_PRELOAD=<--vrf-preload>` and `VRF=<name>`; the `default` instance's
+  `env` is empty. The template unit reads it (§7); the BDD node script exports
+  the same variables before starting each keepalived.
+- Reload only instances whose rendered file changed, stop an instance whose
+  subtree disappeared, start one on its first non-empty render. The first
+  release already behaves this way for `default`.
+- VRID uniqueness stays per (interface, family): the same VRID may appear in
+  two VRFs on different interfaces, as the virtual MAC is per L2 segment.
+- `rfc3768-compatibility`: keepalived creates the macvlan and, being 2.2.8,
+  enslaves it to the parent's VRF master itself; the shim is not involved in
+  netlink. Verify in the spike.
+
+### Show
+
+`show vrrp vrf <name> [statistics | detail]`. zebra-rs's generic VRF redirect
+looks for a per-VRF show channel, finds none for an external provider, and
+falls through to the `vrrp` provider with the original path, so insomnia
+receives `/show/vrrp/vrf` with the VRF name in `args` and collects from that
+instance's pid file and JSON path. Bare `show vrrp` stays the default VRF, per
+the zebra-rs convention. The exec.yang show subtree is a grouping so the `vrf`
+list reuses it (§9).
+
+### BDD
+
+The two-router feature with `set vrf red` and `set interface i1 vrf red` on
+both routers and the groups under `vrrp vrf red`: assert the virtual address on
+the enslaved interface and its connected route in `ip route show vrf red`,
+ping from the client, failover, declarative unload, teardown. The node script
+starts one keepalived per instance directory with that directory's `env`
+exported.
+
+### Spike, before the VRF step
+
+- Shim ordering: keepalived's own `SO_BINDTODEVICE(<member interface>)` on the
+  advertisement socket survives, and adverts are sent and received on the
+  enslaved interface.
+- `hello-source-address` and unicast peers inside the VRF bind and exchange
+  adverts under the shim.
+- A `ping` health check under inherited `LD_PRELOAD` reaches a VRF-internal
+  target (the `cap_net_raw` question above).
+- The VMAC macvlan lands in the VRF and the virtual address appears in the
+  VRF's table.
+
+### Prepared in the first release
+
+Per-instance directory layout with `TMPDIR` (§7), the template unit with its
+`env` file, compare-before-reload, a renderer that takes a subtree, the show
+grammar as a grouping (§9), and the reserved `--vrf-preload` flag.
+
+## 14. Deferred, with reasons
 
 - **`virtual-server` / `real-server`** — IPVS load balancing rendered into
   `virtual_server` blocks. Separate feature; needs the `ip_vs` module and its
@@ -536,11 +668,13 @@ against the host keepalived:
   the IPv4 pair is green.
 - **FRR's `accept-mode`** — see §2: FRR itself does not implement it, and
   keepalived's `no_accept` needs nftables rules of its own.
+- **VRRP in a VRF** — designed in §13; needs the `vrf.o` shim and the
+  `vrrp vrf <name>` list.
 - **FRR-style per-interface spelling** (`interface eth0` / `vrrp 5 …`) as an
   alias onto the same model — only if operators coming from FRR ask for it;
   §2 explains why it is not the primary tree.
 
-## 14. References
+## 15. References
 
 - vyos-1x `current`:
   `src/conf_mode/high-availability.py`,
@@ -554,7 +688,8 @@ against the host keepalived:
 - FRR (`~/frr`, master): `yang/frr-vrrpd.yang`, `vrrpd/vrrp_vty.c`,
   `vrrpd/vrrp.h` (defaults), `doc/user/vrrp.rst`
 - keepalived v2.2.8: `keepalived/core/main.c`, `keepalived/vrrp/vrrp_daemon.c`,
-  `keepalived/vrrp/vrrp_json.c`, `man keepalived.conf` (`json_version`,
+  `keepalived/vrrp/vrrp_json.c`, `keepalived/vrrp/vrrp_vmac.c` and
+  `keepalived/vrrp/vrrp.c` (VRF handling), `lib/utils.c` (`TMPDIR`), `man keepalived.conf` (`json_version`,
   `notify_fifo`, `use_vmac`, `dynamic_interfaces`)
 - zebra-rs: `zebra-rs/yang/ipsec.yang` (module style),
   `zebra-rs/src/config/manager.rs` (`show_proto`, `SubscribeShow`,
