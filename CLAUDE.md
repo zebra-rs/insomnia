@@ -29,7 +29,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # CI gate
 
 Run locally: `RUST_LOG=debug cargo run -- --host unix:zebra-rs/vty` (env-filter logging,
 default `info`). `--host` accepts `unix:NAME` (Linux abstract socket, the default),
-`tcp://HOST:PORT`, or a bare host (port 2666); `--swanctl-dir` and `--vici-socket`
+`unix:/PATH` (filesystem socket), `tcp:HOST:PORT` / `tcp://HOST:PORT`, or a bare host
+(port 2666); `--swanctl-dir` and `--vici-socket`
 default to the stock strongSwan paths. `--keepalived-dir` (default `/run/insomnia/vrrp`)
 holds one keepalived instance directory per VRF; `--keepalived-control systemd|signal`
 picks between the `insomnia-keepalived@<vrf>.service` template unit and SIGHUP to the
