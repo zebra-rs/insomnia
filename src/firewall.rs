@@ -21,7 +21,8 @@
 //! - interface names are always quoted (VyOS quotes only set members);
 //! - `global-options` sysctl-style toggles and conntrack timeouts are
 //!   NOT applied yet (state-policy IS rendered) — they need a
-//!   different mechanism (sysctl writes), noted per-commit in the log.
+//!   different mechanism (sysctl writes). [`GlobalOptions`] keeps only
+//!   `state-policy`, so the other leaves are dropped without a log line.
 //!
 //! Anything the renderer cannot express safely is skipped with a
 //! warning naming the rule — a rendered script is always syntactically
