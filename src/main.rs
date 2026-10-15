@@ -38,7 +38,8 @@ mod vrrp;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// zebra-rs vty gRPC endpoint: unix:NAME (Linux abstract socket),
-    /// tcp://HOST:PORT, or bare HOST (port 2666).
+    /// unix:/PATH (filesystem socket), tcp:HOST:PORT, or bare HOST
+    /// (port 2666).
     #[arg(long, default_value = "unix:zebra-rs/vty")]
     host: String,
 
