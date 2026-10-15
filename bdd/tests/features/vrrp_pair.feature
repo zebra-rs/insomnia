@@ -1,9 +1,9 @@
 @serial
 @vrrp_pair
-Feature: VRRP master/backup pair with keepalived (vrrp, ISO feature)
+Feature: VRRP master/backup pair with keepalived (vrrp, insomnia feature)
 
   zebra-rs owns the VyOS-derived `vrrp` config subtree (enabled with
-  `--feature iso`); insomnia subscribes to it over the zebra.config.v1
+  `--feature insomnia`); insomnia subscribes to it over the zebra.config.v1
   gRPC API, renders keepalived.conf, reloads keepalived, and answers
   `show vrrp` on the zebra-rs CLI as the zebra.show.v1 provider — live
   state read back from keepalived's JSON dump.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # One VRRP router for the vrrp_pair BDD feature: keepalived, zebra-rs
-# (the config owner, `--feature iso`) and insomnia (the enforcement
+# (the config owner, `--feature insomnia`) and insomnia (the enforcement
 # daemon that renders keepalived.conf, reloads keepalived and answers
 # `show vrrp`), together inside a PRIVATE MOUNT NAMESPACE with tmpfs
 # over /run.
@@ -109,7 +109,7 @@ YANG="$(cd "$(dirname "$ZEBRA")/../share/zebra-rs/yang" && pwd)"
 # root creates entries: zebra-rs writes there as root, and a predictable
 # name under /tmp could be a symbolic link somebody else put there.
 ZEBRA_HOSTNAME_STUB_DIR="/run/zebra-rs-bdd/hostname/$NS" \
-    "$ZEBRA" --feature iso --daemon \
+    "$ZEBRA" --feature insomnia --daemon \
     --log-output=file --log-file="logs/$NS.log" \
     --pid-file="/tmp/$NS.pid" -c /dev/null --yang-path "$YANG"
 

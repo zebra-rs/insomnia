@@ -47,8 +47,11 @@ $ zebra-rs --feature insomnia
 ```
 
 those subtrees do not exist in the schema, so insomnia has no
-configuration to enforce. (`--feature iso`, the earlier name, still
-works, with a warning at startup.)
+configuration to enforce.
+
+zebra-rs v26.10.1 and earlier call this feature `iso`; start those
+releases with `--feature iso`. Later releases still accept
+`--feature iso` as a deprecated alias and log a warning at startup.
 
 The insomnia package sets this up for the packaged zebra-rs: it ships
 `/usr/lib/systemd/system/zebra-rs.service.d/insomnia.conf`, a drop-in
