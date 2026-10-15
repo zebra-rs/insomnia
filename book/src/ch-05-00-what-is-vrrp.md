@@ -11,14 +11,14 @@ The tree is VyOS's `high-availability vrrp` with the `high-availability`
 wrapper dropped: every leaf below `vrrp` keeps its VyOS name, so a VyOS
 configuration ports by deleting that one prefix.
 
-VRRP support is part of the optional ISO feature set. Start the daemon
-with the feature enabled:
+VRRP support is behind the optional zebra-rs `insomnia` feature.
+Start the daemon with the feature enabled:
 
 ```console
-$ zebra-rs --feature iso
+$ zebra-rs --feature insomnia
 ```
 
-Without `--feature iso` the whole `vrrp` subtree is absent from the
+Without `--feature insomnia` the whole `vrrp` subtree is absent from the
 schema — the commands do not complete and do not parse.
 
 ## Prerequisites

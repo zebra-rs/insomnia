@@ -94,7 +94,7 @@ namespace, and asserts `the test environment should be clean`.
 
 Nodes that need more than zebra-rs run through a script spawned into the
 namespace: `tests/scripts/ipsec_node.sh` starts `charon-systemd`, zebra-rs
-(`--feature iso`) and insomnia inside a private mount namespace so both
+(`--feature insomnia`) and insomnia inside a private mount namespace so both
 IPsec nodes can use the stock `/etc/swanctl` and `/run/charon.vici` paths
 on one host. Configuration files live under
 `tests/configs/<feature>/` and are applied with `vtyctl apply`.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # One VRRP router for the vrrp_pair BDD feature: keepalived, zebra-rs
-# (the config owner, `--feature iso`) and insomnia (the enforcement
+# (the config owner, `--feature insomnia`) and insomnia (the enforcement
 # daemon that renders keepalived.conf, reloads keepalived and answers
 # `show vrrp`), together inside a PRIVATE MOUNT NAMESPACE with tmpfs
 # over /run.
@@ -69,7 +69,7 @@ done
 # namespace, so the daemonized child keeps the private mounts.
 ZEBRA="$(command -v zebra-rs)"
 YANG="$(cd "$(dirname "$ZEBRA")/../share/zebra-rs/yang" && pwd)"
-"$ZEBRA" --feature iso --daemon \
+"$ZEBRA" --feature insomnia --daemon \
     --log-output=file --log-file="logs/$NS.log" \
     --pid-file="/tmp/$NS.pid" -c /dev/null --yang-path "$YANG"
 

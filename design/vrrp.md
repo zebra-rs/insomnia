@@ -101,8 +101,8 @@ knobs are worth borrowing.
 ### Decision
 
 The VyOS group model stays, hoisted to a top-level `vrrp` node (placement
-decision above). insomnia's whole ISO surface is VyOS-shaped, keepalived
-is the backend, and FRR's per-interface placement would force a nameless,
+decision above). insomnia's whole feature-gated surface is VyOS-shaped,
+keepalived is the backend, and FRR's per-interface placement would force a nameless,
 VRID-keyed model that cannot express sync groups or health checks. Nothing in
 FRR's model argues for switching.
 
@@ -153,7 +153,7 @@ instantiated in `config.yang` as
 
 ```yang
 container vrrp {
-  if-feature feat:iso;
+  if-feature feat:insomnia;
   ext:help "Virtual Router Redundancy Protocol (VRRP)";
   uses "vrrp:vrrp";
 }
@@ -388,7 +388,7 @@ Packaging:
 
 ## 8. Show commands
 
-Grammar (zebra-rs `exec.yang`, gated on `feat:iso`, same presence-container
+Grammar (zebra-rs `exec.yang`, gated on `feat:insomnia`, same presence-container
 style as `show firewall`):
 
 ```
@@ -439,12 +439,12 @@ Rendering:
 
 Two small PRs (may land as one):
 
-1. **Schema** — `zebra-rs/yang/vrrp.yang` and the iso-gated `container
+1. **Schema** — `zebra-rs/yang/vrrp.yang` and the insomnia-gated `container
    vrrp` in `config.yang` (VyOS leaves verbatim plus the three
    `[ext]` leaves from §2); presence tests next to the firewall and
-   ipsec ones in `config/manager.rs` (`shipped_tree(&["iso"])`).
+   ipsec ones in `config/manager.rs` (`shipped_tree(&["insomnia"])`).
 2. **Show grammar and routing** — the three commands in `exec.yang` under
-   `if-feature feat:iso`, declared through a grouping so §13's per-VRF form
+   `if-feature feat:insomnia`, declared through a grouping so §13's per-VRF form
    reuses them; `is_vrrp()` in `config/manager.rs` returning `"vrrp"`
    from `show_proto()` and `"VRRP"` in the not-running fallback; a routing unit
    test like the existing `"firewall"` / `"ipsec"` ones.
@@ -492,7 +492,7 @@ and must never touch the host's strongSwan config), then
 start keepalived on an empty `/run/insomnia/vrrp/default/keepalived.conf` with
 `TMPDIR=/run/insomnia/vrrp/default` (`--dont-fork --use-file … --pid
 …/keepalived.pid --log-console`, log bind-mounted to
-`logs/<ns>.keepalived.log`), zebra-rs with `--feature iso`, and insomnia with
+`logs/<ns>.keepalived.log`), zebra-rs with `--feature insomnia`, and insomnia with
 `--keepalived-control signal`. The private `/run` keeps each node's pid file
 and JSON dump apart from each other and from the keepalived service already
 running on the development host; signal mode means no node ever calls
@@ -585,7 +585,7 @@ Follow zebra-rs's `router <proto> vrf <name>` convention: a `vrf` list under
 
 ```yang
 container vrrp {
-  if-feature feat:iso;
+  if-feature feat:insomnia;
   uses "vrrp:vrrp";                    // default VRF
   list vrf {
     key name;

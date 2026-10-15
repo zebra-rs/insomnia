@@ -24,18 +24,22 @@ does and when you would change it.
 The firewall backend has no options: it runs `nft` from `PATH` and
 always owns the `zebra_firewall` tables.
 
-## Before you start: zebra-rs `--feature iso`
+## Before you start: zebra-rs `--feature insomnia`
 
-The `firewall`, `vpn ipsec` and `vrrp` configuration trees belong to
-the optional ISO feature set of zebra-rs. Unless zebra-rs is started
-with
+The `firewall`, `vpn ipsec` and `vrrp` configuration trees are behind
+the optional zebra-rs YANG feature `insomnia`. Unless zebra-rs is
+started with
 
 ```console
-$ zebra-rs --feature iso
+$ zebra-rs --feature insomnia
 ```
 
 those subtrees do not exist in the schema, so insomnia has no
 configuration to enforce.
+
+zebra-rs v26.10.1 and earlier call this feature `iso`; start those
+releases with `--feature iso`. Later releases still accept
+`--feature iso` as a deprecated alias and log a warning at startup.
 
 ## Connecting to zebra-rs
 

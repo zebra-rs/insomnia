@@ -8,13 +8,13 @@ and `ip6 zebra_firewall`) and applies it as a single atomic
 transaction — the running ruleset always matches the config tree, and
 a failed apply leaves the previous ruleset untouched.
 
-Firewall support is part of the optional ISO feature set:
+Firewall support is behind the optional zebra-rs `insomnia` feature:
 
 ```console
-$ zebra-rs --feature iso
+$ zebra-rs --feature insomnia
 ```
 
-Without `--feature iso` the `firewall` subtree is absent from the
+Without `--feature insomnia` the `firewall` subtree is absent from the
 schema. The `nft` binary (package `nftables`) must be installed;
 no daemons beyond zebra-rs itself are involved.
 
