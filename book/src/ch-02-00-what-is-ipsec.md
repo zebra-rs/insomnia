@@ -7,14 +7,14 @@ it into the running charon IKE daemon. Loading is declarative: whatever
 you removed from the configuration is unloaded from charon in the same
 step, so there is never a drift between the config tree and the daemon.
 
-IPsec support is part of the optional ISO feature set. Start the daemon
-with the feature enabled:
+IPsec support is behind the optional zebra-rs `insomnia` feature.
+Start the daemon with the feature enabled:
 
 ```console
-$ zebra-rs --feature iso
+$ zebra-rs --feature insomnia
 ```
 
-Without `--feature iso` the whole `vpn` subtree is absent from the
+Without `--feature insomnia` the whole `vpn` subtree is absent from the
 schema — the commands do not complete and do not parse.
 
 ## Prerequisites
