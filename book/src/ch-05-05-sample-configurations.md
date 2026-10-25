@@ -6,7 +6,7 @@ zebra-rs as written, and every `keepalived.conf` shown is what insomnia
 rendered from it into `/run/insomnia/vrrp/default/keepalived.conf` —
 so the pairs are a faithful guide to what reaches keepalived.
 
-All samples assume `zebra-rs --feature iso` and keepalived installed.
+All samples assume `zebra-rs --feature insomnia` and keepalived installed.
 
 ## 1. A master/backup pair
 
