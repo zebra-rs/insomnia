@@ -88,22 +88,24 @@ the three trees."""
 # Custom maintainer scripts; each carries a #DEBHELPER# token where cargo-deb
 # injects the generated systemd fragments.
 maintainer-scripts = "packaging/maintainer"
+# insomnia-keepalived@.service is the per-VRF keepalived template unit
+# insomnia starts, reloads and stops itself. It has no [Install] section and
+# needs no maintainer-script fragments, so it ships as a plain asset. As a
+# second systemd-units entry, its `enable = false, start = false` replaced
+# the fragments generated for insomnia.service (cargo-deb 3.7.0), and a
+# fresh install left insomnia disabled and stopped.
 assets = [
   ["target/release/insomnia", "usr/bin/", "755"],
+  ["packaging/systemd/insomnia-keepalived@.service", "usr/lib/systemd/system/", "644"],
 ]
 
-# systemd units. cargo-deb adds every unit under packaging/systemd as an
-# asset and injects the enable/start/restart/stop fragments at the
-# #DEBHELPER# token in the maintainer scripts:
-#  * insomnia.service — enabled and started, restart-after-upgrade. It runs
-#    a bare `insomnia`; the default --host (unix:zebra-rs/vty), --swanctl-dir
-#    (/etc/swanctl), --vici-socket (/var/run/charon.vici) and
-#    --keepalived-dir (/run/insomnia/vrrp) resolve a same-host install
-#    without flags.
-#  * insomnia-keepalived@.service — the per-VRF keepalived template unit
-#    insomnia starts, reloads and stops itself; neither enabled nor started
-#    at install time.
+# systemd unit. cargo-deb adds packaging/systemd/insomnia.service as an asset
+# and injects the enable/start/restart/stop fragments at the #DEBHELPER#
+# token in the maintainer scripts: enabled and started on install,
+# restart-after-upgrade. It runs a bare `insomnia`; the default --host
+# (unix:zebra-rs/vty), --swanctl-dir (/etc/swanctl), --vici-socket
+# (/var/run/charon.vici) and --keepalived-dir (/run/insomnia/vrrp) resolve a
+# same-host install without flags.
 systemd-units = [
   { unit-name = "insomnia", unit-scripts = "packaging/systemd", restart-after-upgrade = true },
-  { unit-name = "insomnia-keepalived@", unit-scripts = "packaging/systemd", enable = false, start = false },
 ]
