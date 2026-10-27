@@ -34,8 +34,11 @@ tonic-prost-build = "0.14"
 # The BDD harness (bdd/) is a workspace member so one `cargo` invocation
 # covers both; its cucumber test needs root + network namespaces and is run
 # through bdd/Makefile, never by CI (`cargo test --workspace --exclude bdd`).
+# dhcp-packet (the codec) and dhcp-relay (the insomnia-dhcp-relay daemon)
+# are the native DHCP relay: a separate, unprivileged process, so a parser
+# bug stays out of the root insomnia daemon.
 [workspace]
-members = ["bdd"]
+members = ["bdd", "dhcp-packet", "dhcp-relay"]
 
 # Workspace-wide clippy configuration, inherited via `[lints] workspace =
 # true` (the same set zebra-rs uses, so the shared harness sources lint
