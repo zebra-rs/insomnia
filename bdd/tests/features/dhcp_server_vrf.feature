@@ -81,7 +81,8 @@ Feature: DHCP servers per VRF with overlapping tenants (service dhcp-server vrf,
     And show command "show process kea-dhcp6@blue" in namespace "r1" should contain "kea-dhcp6@blue  blue  running  up"
     And show command "show process kea-dhcp4@default" in namespace "r1" should contain "kea-dhcp4@default  default  running  up"
     And show command "show process" in namespace "r1" should contain "dhcp-relay"
-    And show command "show process" in namespace "r1" should contain "keepalived@default"
+    And show command "show process" in namespace "r1" should not contain "keepalived@default"
+    And show command "show process keepalived@default" in namespace "r1" should contain "keepalived@default  default  stopped  down"
     And show command "stop process kea-dhcp4@red" in namespace "r1" should contain "Not supported in signal mode"
     And show command "show process kea-dhcp4@green" in namespace "r1" should contain "No process"
 
