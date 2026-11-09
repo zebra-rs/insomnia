@@ -2,7 +2,7 @@
 name = "insomnia"
 # Kept in sync with the top-level `version` file by packaging/version-update.sh;
 # cargo-deb reads the package version from here.
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
 description = "Out-of-process firewall / IPsec / VRRP / DHCP enforcement daemon for zebra-rs"

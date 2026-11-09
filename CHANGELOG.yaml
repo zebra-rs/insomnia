@@ -11,6 +11,66 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 0.3.0
+  date: 2026-11-09T20:40:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### DHCP server on Kea
+        * New `service dhcp-server` and `service dhcpv6-server` trees
+          (VyOS's, verbatim) render into complete kea-dhcp4 / kea-dhcp6
+          configurations after the VyOS templates. One Kea per family per
+          VRF (`insomnia-kea-dhcp{4,6}@<vrf>.service`, `default` for the
+          global table), loaded with `config-test` and `config-reload`
+          over its control socket: a commit never restarts Kea, and a
+          configuration Kea refuses leaves it on the previous one
+        * Kea never listens on every interface: the listen set is the
+          interfaces carrying an address in a configured subnet (or
+          `listen-interface` / `listen-address`), followed live through a
+          netlink watcher; DHCPv6 waits for duplicate address detection
+        * DHCPv6 prefix delegation installs `proto dhcp` routes towards
+          the requesting router, triggered by Kea's run_script hook
+          (`/usr/lib/insomnia/kea-notify`) and confirmed against Kea's
+          lease table before the routing table is touched
+        * `show dhcp[v6] server [vrf <name>] leases | statistics |
+          static-mappings [pool <name>]`
+        * Recommends kea-dhcp4-server and kea-dhcp6-server; the units run
+          Kea as `_kea` with two capabilities under the systemd sandbox
+        ### DHCP relay agent
+        * New `insomnia-dhcp-relay`, a DHCPv4/DHCPv6 relay agent written
+          in Rust (replacing ISC dhcrelay), driven by `service dhcp-relay`
+          and `service dhcpv6-relay`, and per VRF by their `vrf <name>`
+          lists: option 82 with the listen interface as circuit-id,
+          Interface-ID, forged replies dropped and counted
+        * Runs as `insomnia-dhcp-relay.service` with a dynamic user and two
+          capabilities; `show dhcp[v6] relay [vrf <name>] statistics`
+        ### Daemons and VRFs
+        * `show process [<name>]` and `start | stop | restart process
+          <name>` for keepalived, Kea and the relay agent; `stop process`
+          holds a daemon down across commits and insomnia restarts until
+          `start process`
+        * Daemons are bound to their VRF by a cgroup-BPF socket program
+          insomnia pins per VRF and the template units attach
+          (`BPFProgram=`, guarded by `AssertPathExists=`), the mechanism
+          of `ip vrf exec`; a VRF that is re-created is re-pinned and its
+          daemons restarted
+        * `vrrp vrf <name>`: one keepalived per VRF, beside the global
+          table's; `show vrrp vrf <name> [statistics | detail]`
+        * One set of rules for every per-VRF instance: an interface it
+          names must be a member of its VRF (otherwise it is skipped with
+          a warning), a missing VRF is reported once, and `default` is
+          reserved for the global table
+        ### Changes to know about
+        * `--vrf-preload` and the per-instance keepalived `env` file are
+          gone; `insomnia-keepalived@.service` now needs the pinned
+          program, which insomnia creates before it starts an instance
+        * A VRRP group of the global table on an interface enslaved to a
+          VRF is now skipped with a warning
+        * `insomnia.service` is enabled and started on install
+        * Needs a zebra-rs with the `service` trees, the process commands
+          and `vrrp vrf` (zebra-rs#2616, #2619, #2622, #2625, #2626)
 - semver: 0.2.0
   date: 2026-09-07T20:00:00+09:00
   distribution: unstable
