@@ -4,10 +4,10 @@ Status: proposal, 2026-10-26. The relay is implemented (2026-11-08): the
 agent (§10, insomnia PR #19), the `service dhcp-relay` / `dhcpv6-relay` trees
 with their `vrf` lists, and the relay backend and statistics (zebra-rs branch
 `service-dhcp-relay`, insomnia branch `dhcp-relay-backend`). The server is
-implemented (2026-11-09; zebra-rs branch `service-dhcp-server`, insomnia
-branch `dhcp-server`): work items 1–9 of §17 except the AppArmor profiles,
-with per-VRF instances in socket mode only until the VRF binding of
-`design/process.md` §4 exists. §22 records what the implementation changed. This document settles open decision D9 in `design/vyos-gap.md`, which
+implemented (2026-11-09; zebra-rs#2619, insomnia#22): work items 1–9 of §17
+except the AppArmor profiles. Per-VRF instances run under systemd since the
+VRF binding of `design/process.md` §4 (branch `process-vrf`). §22 records
+what the implementation changed. This document settles open decision D9 in `design/vyos-gap.md`, which
 ranks DHCP second among the missing insomnia-shaped features, after NAT.
 
 insomnia gains DHCP in two parts:
@@ -581,9 +581,11 @@ in for `_kea` (no Kea package on the test host), in a scratch network
 namespace: both instances served a real client (`CapEff` 0x2400), hooks
 loaded under `NoNewPrivileges` and `SystemCallFilter=@system-service`, the
 DHCPv6 `run_script` hook ran kea-notify and its datagram arrived, and the
-lease files were 0640. A VRF instance (`@red`) is not started under
-systemd yet: without the `BPFProgram=` binding it would run in the default
-VRF, so insomnia warns and leaves it stopped (§19).
+lease files were 0640. VRF instances (`@red`) are bound by the template's
+`BPFProgram=` and `AssertPathExists=` lines (§19, `design/process.md` §4);
+`bdd/tests/scripts/vrf_units.sh` runs the shipped template under systemd
+and checks the binding, a lease in the VRF, and `stop|start|restart
+process`.
 
 Packaging takes the lesson of PR #18: the template units are plain `assets`,
 not extra `systemd-units` entries. Under cargo-deb 3.7.0, a second entry with

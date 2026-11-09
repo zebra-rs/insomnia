@@ -34,7 +34,7 @@ use anyhow::Context;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::process;
+use crate::process::{self, Registry, Runner};
 
 /// How insomnia gets a Kea instance to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -102,6 +102,9 @@ pub enum Applied {
     /// Kea refused the render; it keeps running its previous
     /// configuration. Kea's own message.
     Rejected(String),
+    /// Stopped by an operator (`stop process`): the file is in place,
+    /// the instance stays down until `start process`.
+    Held,
 }
 
 /// Paths and control of every instance.
@@ -118,6 +121,7 @@ pub struct Kea {
     /// The program Kea's `run_script` hook runs for DHCPv6 lease events
     /// (design/dhcp.md §7.5).
     pub notify: PathBuf,
+    pub registry: std::sync::Arc<Registry>,
 }
 
 /// Kea answers within milliseconds; a reload re-opens sockets and the
@@ -171,6 +175,19 @@ impl Kea {
                 .with_context(|| format!("link {} to {}", link.display(), self.notify.display()))?;
         }
         Ok(self.instance_dir(vrf).join("events"))
+    }
+
+    /// The registry name: `kea-dhcp4@red`.
+    pub fn process_name(&self, family: Family, vrf: &str) -> String {
+        format!("{}@{vrf}", family.daemon())
+    }
+
+    /// Kea's own pid file (`KEA_PIDFILE_DIR` is the instance directory;
+    /// Kea names it after the configuration file and the daemon).
+    pub fn pid_file(&self, family: Family, vrf: &str) -> PathBuf {
+        let daemon = family.daemon();
+        self.instance_dir(vrf)
+            .join(format!("{daemon}.{daemon}.pid"))
     }
 
     pub fn unit(&self, family: Family, vrf: &str) -> String {
@@ -228,11 +245,46 @@ impl Kea {
         text: &str,
         serving: bool,
     ) -> anyhow::Result<Applied> {
+        let name = self.process_name(family, vrf);
+        let runner = match self.control {
+            Control::Systemd => Runner::Unit(self.unit(family, vrf)),
+            Control::Socket => Runner::External(self.pid_file(family, vrf)),
+        };
+        self.registry.register(&name, Some(vrf), runner, serving);
+        let result = self.apply_instance(family, vrf, text, serving).await;
+        let error = match &result {
+            Ok(Applied::Rejected(err)) => Some(format!("Kea refused the configuration: {err}")),
+            Ok(_) => None,
+            Err(err) => Some(format!("{err:#}")),
+        };
+        self.registry.note(&name, error);
+        result
+    }
+
+    async fn apply_instance(
+        &self,
+        family: Family,
+        vrf: &str,
+        text: &str,
+        serving: bool,
+    ) -> anyhow::Result<Applied> {
         if !serving && self.control == Control::Systemd {
             process::systemctl("stop", &self.unit(family, vrf)).await?;
             return Ok(Applied::Stopped);
         }
         let conf = self.conf(family, vrf);
+        if self.control == Control::Systemd && self.registry.held(&self.process_name(family, vrf)) {
+            // Stopped by an operator: keep the file current, so
+            // `start process` brings it up on the latest configuration,
+            // and keep the instance down (also after an insomnia
+            // restart).
+            self.prepare(vrf).await?;
+            if tokio::fs::read_to_string(&conf).await.ok().as_deref() != Some(text) {
+                write_conf(&conf, text).await?;
+            }
+            process::systemctl("stop", &self.unit(family, vrf)).await?;
+            return Ok(Applied::Held);
+        }
         let running = self.running(family, vrf).await;
         let current = tokio::fs::read_to_string(&conf).await.ok();
         if running && current.as_deref() == Some(text) {
@@ -261,6 +313,9 @@ impl Kea {
                 if let Some(err) = check(family, &conf).await {
                     return Ok(Applied::Rejected(err));
                 }
+                // The unit's socket program for its VRF must be pinned
+                // first: `AssertPathExists=` refuses the start otherwise.
+                self.registry.bind(vrf)?;
                 process::systemctl("start", &self.unit(family, vrf)).await?;
                 Ok(Applied::Started)
             }
@@ -386,6 +441,16 @@ mod tests {
             unit6: "insomnia-kea-dhcp6@.service".into(),
             hooks_dir: "/usr/lib/x86_64-linux-gnu/kea/hooks".into(),
             notify: "/usr/lib/insomnia/kea-notify".into(),
+            registry: {
+                let (_tx, rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+                    crate::links::Snapshot::default(),
+                ));
+                std::sync::Arc::new(Registry::new(
+                    std::env::temp_dir().join(format!("insomnia-kea-holds-{}", std::process::id())),
+                    None,
+                    rx,
+                ))
+            },
         }
     }
 
@@ -411,6 +476,11 @@ mod tests {
         assert_eq!(
             kea.unit(Family::V6, "red"),
             "insomnia-kea-dhcp6@red.service"
+        );
+        assert_eq!(kea.process_name(Family::V4, "red"), "kea-dhcp4@red");
+        assert_eq!(
+            kea.pid_file(Family::V4, "default"),
+            Path::new("/run/insomnia/kea/default/kea-dhcp4.kea-dhcp4.pid")
         );
         // A 15-character VRF name stays far below sun_path's 108 bytes.
         let longest = kea.socket(Family::V4, "abcdefghijklmno");

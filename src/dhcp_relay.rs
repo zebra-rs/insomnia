@@ -148,6 +148,9 @@ async fn apply(relayd: &Relayd, trees: &Trees) {
         Ok(Applied::Stopped) => {
             tracing::info!("dhcp-relay: relay agent stopped (no configuration)")
         }
+        Ok(Applied::Held) => tracing::info!(
+            "dhcp-relay: relay agent stopped by an operator (stop process); configuration written, not loaded"
+        ),
         Ok(Applied::NotRunning) => tracing::warn!(
             "dhcp-relay: relay agent not running; configuration rendered to {} but not loaded",
             relayd.conf().display()

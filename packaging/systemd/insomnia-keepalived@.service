@@ -6,16 +6,22 @@ Documentation=man:keepalived(8) man:keepalived.conf(5)
 # enabled on its own. Instance `default` serves the global routing table.
 After=network-online.target insomnia.service
 Wants=network-online.target
+# The instance runs in VRF %i: systemd attaches the socket program insomnia
+# pins for that VRF (BPFProgram= below; design/process.md §4), which binds
+# every IPv4/IPv6 socket keepalived and its children (health checks,
+# notify scripts) create to the VRF device. `default` gets a program that
+# leaves sockets unbound. insomnia pins the program before it starts the
+# instance; without this line a missing program would run keepalived in
+# the default VRF. It must be in [Unit]: systemd ignores it in [Service].
+AssertPathExists=/sys/fs/bpf/insomnia/vrf/%i
 
 [Service]
 Type=notify
+BPFProgram=sock_create:/sys/fs/bpf/insomnia/vrf/%i
 # keepalived writes its dump files (keepalived.json for `show vrrp`,
 # .data, .stats) under TMPDIR; keep them inside the instance directory,
 # away from any distribution keepalived's /tmp/keepalived.json.
 Environment=TMPDIR=/run/insomnia/vrrp/%i
-# Empty for `default`; LD_PRELOAD=<vrf shim> and VRF=<name> for VRF
-# instances (written by insomnia).
-EnvironmentFile=-/run/insomnia/vrrp/%i/env
 ExecStart=/usr/sbin/keepalived --dont-fork \
     --use-file /run/insomnia/vrrp/%i/keepalived.conf \
     --pid /run/insomnia/vrrp/%i/keepalived.pid \

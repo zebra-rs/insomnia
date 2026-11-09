@@ -111,6 +111,9 @@ async fn process(update: JsonConfigUpdate, ka: &Keepalived, state: &mut ShowStat
         Ok(Applied::Loaded) => tracing::info!("vrrp: keepalived configuration loaded"),
         Ok(Applied::Unchanged) => tracing::info!("vrrp: keepalived configuration unchanged"),
         Ok(Applied::Stopped) => tracing::info!("vrrp: keepalived stopped (no configuration)"),
+        Ok(Applied::Held) => tracing::info!(
+            "vrrp: keepalived stopped by an operator (stop process); configuration written, not loaded"
+        ),
         Ok(Applied::NotRunning) => tracing::warn!(
             "vrrp: keepalived not running; configuration rendered to {} but not loaded",
             paths.conf.display()

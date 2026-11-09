@@ -44,6 +44,7 @@ mod relayd;
 mod subscribe;
 mod text;
 mod vici;
+mod vrf;
 mod vrrp;
 
 #[derive(Parser)]
@@ -80,9 +81,19 @@ struct Args {
     #[arg(long, default_value = "insomnia-keepalived@.service")]
     keepalived_unit: String,
 
-    /// LD_PRELOAD shim written into non-default VRF instances' env file.
-    #[arg(long, default_value = "/usr/lib/insomnia/vrf.o")]
-    vrf_preload: PathBuf,
+    /// Operator holds (`stop process`): one file per held instance.
+    /// Survive an insomnia restart, not a reboot.
+    #[arg(long, default_value = "/run/insomnia/holds")]
+    holds_dir: PathBuf,
+
+    /// bpffs directory of the VRF socket programs the per-VRF template
+    /// units attach (`BPFProgram=sock_create:<dir>/%i`).
+    #[arg(long, default_value = "/sys/fs/bpf/insomnia/vrf")]
+    vrf_bpf_dir: PathBuf,
+
+    /// Where the interface index of each pinned VRF program is recorded.
+    #[arg(long, default_value = "/run/insomnia/vrf")]
+    vrf_state_dir: PathBuf,
 
     /// Directory the DHCP relay backend renders relay.json into, for
     /// the insomnia-dhcp-relay agent; also holds the agent's relay.pid
@@ -156,13 +167,34 @@ async fn main() {
     let (vrrp_show_tx, vrrp_show_rx) = mpsc::channel(8);
     let (dhcp_show_tx, dhcp_show_rx) = mpsc::channel(8);
     let (dhcp_server_show_tx, dhcp_server_show_rx) = mpsc::channel(8);
+    let (process_show_tx, process_show_rx) = mpsc::channel(8);
+
+    let links = links::spawn().await;
+    // VRF socket programs are pinned only for daemons systemd runs; in
+    // signal and socket mode whoever starts the daemon binds it (the BDD
+    // harness uses `ip vrf exec`).
+    let pins = (args.keepalived_control == process::Control::Systemd
+        || args.kea_control == kea::Control::Systemd)
+        .then_some(vrf::Pins {
+            root: args.vrf_bpf_dir,
+            state: args.vrf_state_dir,
+        });
+    let registry = Arc::new(process::Registry::new(
+        args.holds_dir,
+        pins.clone(),
+        links.clone(),
+    ));
+    if let Some(pins) = pins {
+        tokio::spawn(vrf::run(pins, Arc::clone(&registry), links.clone()));
+    }
+    tokio::spawn(process::serve(Arc::clone(&registry), process_show_rx));
 
     let ka = Arc::new(
         keepalived::Keepalived::new(
             args.keepalived_dir,
             args.keepalived_control,
             args.keepalived_unit,
-            args.vrf_preload,
+            Arc::clone(&registry),
         )
         .probe()
         .await,
@@ -181,9 +213,9 @@ async fn main() {
         control: args.dhcp_relay_control,
         unit: args.dhcp_relay_unit,
         socket: args.dhcp_relay_socket,
+        registry: Arc::clone(&registry),
     });
     tokio::spawn(dhcp_relay::run(args.host.clone(), relayd, dhcp_show_rx));
-    let links = links::spawn().await;
     let kea = Arc::new(kea::Kea {
         dir: args.kea_dir,
         state_dir: args.kea_state_dir,
@@ -192,6 +224,7 @@ async fn main() {
         unit6: args.kea_unit6,
         hooks_dir: args.kea_hooks_dir.unwrap_or_else(default_kea_hooks_dir),
         notify: args.kea_notify,
+        registry,
     });
     tokio::spawn(dhcp_server::run(
         args.host.clone(),
@@ -209,6 +242,7 @@ async fn main() {
             vrrp: vrrp_show_tx,
             dhcp: dhcp_show_tx,
             dhcp_server: dhcp_server_show_tx,
+            process: process_show_tx,
         },
     )
     .await;

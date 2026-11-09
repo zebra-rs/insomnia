@@ -2,12 +2,15 @@
 //!
 //! One keepalived *instance* per VRF lives under
 //! `--keepalived-dir/<vrf>/` (`default` for the global routing table):
-//! the rendered `keepalived.conf`, the parent/child pid files, the
+//! the rendered `keepalived.conf`, the parent/child pid files and the
 //! dump files keepalived writes on request (steered there through
-//! `TMPDIR`, which keepalived honours), and the per-instance `env`
-//! file the systemd template unit reads. The first release only ever
+//! `TMPDIR`, which keepalived honours). The first release only ever
 //! creates `default`; the per-VRF expansion (design/vrrp.md §13) adds
-//! instances without changing any path.
+//! instances without changing any path. A VRF instance's unit is bound
+//! to its VRF by the pinned socket program its template names
+//! (`BPFProgram=`, design/process.md §4), which `process::reload` makes
+//! sure of before the unit starts; the instance is registered as
+//! `keepalived@<vrf>` for `show process`.
 //!
 //! keepalived stays a separately supervised process (a package upgrade
 //! restarts insomnia, and killing the VRRP master for that would force
@@ -23,25 +26,25 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-use crate::process::{self, live_pid, signal, write_if_changed};
+use crate::process::{self, Managed, Registry, live_pid, signal, write_if_changed};
 pub use crate::process::{Applied, Control};
 
 /// Per-daemon keepalived settings, shared by every instance.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Keepalived {
     pub dir: PathBuf,
     pub control: Control,
     /// Template unit (`name@.service`); a unit without `@.` is used as
     /// is for every instance.
     pub unit: String,
-    /// `LD_PRELOAD` shim written into non-default instances' `env`.
-    pub vrf_preload: PathBuf,
     /// Signal that makes keepalived write its JSON dump.
     pub json_signal: i32,
+    pub registry: Arc<Registry>,
 }
 
 /// Every path of one instance.
@@ -54,7 +57,6 @@ pub struct InstancePaths {
     /// the unit / node script; insomnia never reads them.
     pub pid: PathBuf,
     pub json: PathBuf,
-    pub env: PathBuf,
 }
 
 /// Why [`collect_json`] returned nothing — the messages match VyOS's
@@ -88,13 +90,13 @@ fn default_json_signal() -> i32 {
 }
 
 impl Keepalived {
-    pub fn new(dir: PathBuf, control: Control, unit: String, vrf_preload: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, control: Control, unit: String, registry: Arc<Registry>) -> Self {
         Self {
             dir,
             control,
             unit,
-            vrf_preload,
             json_signal: default_json_signal(),
+            registry,
         }
     }
 
@@ -156,7 +158,6 @@ impl Keepalived {
             conf: dir.join("keepalived.conf"),
             pid: dir.join("keepalived.pid"),
             json: dir.join("keepalived.json"),
-            env: dir.join("env"),
             dir,
         }
     }
@@ -170,14 +171,9 @@ impl Keepalived {
         }
     }
 
-    /// Contents of the instance's `env` file: empty for the global
-    /// table, the VRF shim for everything else.
-    pub fn env_for(&self, name: &str) -> String {
-        if name == "default" {
-            String::new()
-        } else {
-            format!("LD_PRELOAD={}\nVRF={}\n", self.vrf_preload.display(), name)
-        }
+    /// The registry name of instance `name`: `keepalived@red`.
+    pub fn process_name(name: &str) -> String {
+        format!("keepalived@{name}")
     }
 }
 
@@ -189,17 +185,18 @@ pub async fn apply(ka: &Keepalived, name: &str, conf: &str) -> anyhow::Result<Ap
     tokio::fs::create_dir_all(&paths.dir)
         .await
         .with_context(|| format!("create {}", paths.dir.display()))?;
-    write_if_changed(&paths.env, &ka.env_for(name), 0o644).await?;
     // The config can hold an authentication password: owner-only.
     let changed = write_if_changed(&paths.conf, conf, 0o600).await?;
-    process::reload(
-        ka.control,
-        &ka.unit_for(name),
-        &paths.pid,
-        changed,
-        conf.is_empty(),
-    )
-    .await
+    let unit = ka.unit_for(name);
+    let process = Keepalived::process_name(name);
+    let managed = Managed {
+        name: &process,
+        vrf: Some(name),
+        control: ka.control,
+        unit: &unit,
+        pid_file: &paths.pid,
+    };
+    process::reload(&ka.registry, &managed, changed, conf.is_empty()).await
 }
 
 /// keepalived's JSON dump for instance `name`: one object per VRRP
@@ -237,12 +234,18 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    fn registry() -> Arc<Registry> {
+        let (_tx, rx) = tokio::sync::watch::channel(Arc::new(crate::links::Snapshot::default()));
+        let holds = std::env::temp_dir().join(format!("insomnia-ka-holds-{}", std::process::id()));
+        Arc::new(Registry::new(holds, None, rx))
+    }
+
     fn ka(dir: &Path, control: Control) -> Keepalived {
         Keepalived::new(
             dir.to_path_buf(),
             control,
             "insomnia-keepalived@.service".to_string(),
-            PathBuf::from("/usr/lib/insomnia/vrf.o"),
+            registry(),
         )
     }
 
@@ -256,23 +259,19 @@ mod tests {
     }
 
     #[test]
-    fn unit_and_env_naming() {
+    fn unit_naming() {
         let ka = ka(Path::new("/run/insomnia/vrrp"), Control::Systemd);
         assert_eq!(
             ka.unit_for("default"),
             "insomnia-keepalived@default.service"
         );
         assert_eq!(ka.unit_for("red"), "insomnia-keepalived@red.service");
-        assert_eq!(ka.env_for("default"), "");
-        assert_eq!(
-            ka.env_for("red"),
-            "LD_PRELOAD=/usr/lib/insomnia/vrf.o\nVRF=red\n"
-        );
+        assert_eq!(Keepalived::process_name("red"), "keepalived@red");
         let plain = Keepalived::new(
             PathBuf::from("/x"),
             Control::Systemd,
             "keepalived.service".to_string(),
-            PathBuf::from("/x/vrf.o"),
+            registry(),
         );
         assert_eq!(plain.unit_for("default"), "keepalived.service");
 
@@ -308,7 +307,6 @@ mod tests {
             std::fs::metadata(&paths.conf).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(std::fs::read_to_string(&paths.env).unwrap(), "");
         assert!(!paths.conf.with_extension("zebra-tmp").exists());
 
         // A stale pid file naming a dead process is "not running".
@@ -327,12 +325,10 @@ mod tests {
             Applied::Unchanged
         );
 
-        // Non-default instances carry the VRF shim in env.
+        // Every instance is registered for `show process`.
         assert_eq!(apply(&ka, "red", "").await.unwrap(), Applied::NotRunning);
-        assert_eq!(
-            std::fs::read_to_string(ka.instance("red").env).unwrap(),
-            format!("LD_PRELOAD={}/vrf.o\nVRF=red\n", "/usr/lib/insomnia")
-        );
+        let names: Vec<String> = ka.registry.entries().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["keepalived@default", "keepalived@red"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

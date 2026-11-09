@@ -322,10 +322,9 @@ no path changes. The first release only ever creates `default`.
 
 | Flag | Default | Meaning |
 |:-----|:--------|:--------|
-| `--keepalived-dir` | `/run/insomnia/vrrp` | `<dir>/<vrf>/keepalived.conf` (rendered; temp file + rename, mode 0600), `keepalived.pid` (parent pid; signal mode and `show vrrp`), `keepalived.json` (keepalived's dump, placed here through `TMPDIR`), `env` (per-instance environment, empty; to be removed with the shim, §13) |
+| `--keepalived-dir` | `/run/insomnia/vrrp` | `<dir>/<vrf>/keepalived.conf` (rendered; temp file + rename, mode 0600), `keepalived.pid` (parent pid; signal mode and `show vrrp`), `keepalived.json` (keepalived's dump, placed here through `TMPDIR`) |
 | `--keepalived-control` | `systemd` | `systemd` or `signal` |
 | `--keepalived-unit` | `insomnia-keepalived@.service` | template unit; the instance name is the VRF (`default` for the global table) |
-| `--vrf-preload` | `/usr/lib/insomnia/vrf.o` | `LD_PRELOAD` shim written into non-default instances' `env`. Superseded: to be removed (§13, `design/process.md` §4.8) |
 
 Control modes:
 
@@ -553,7 +552,10 @@ whole process VRF-local regardless.)
 **Binding decision revised (2026-11-08):** the instance is bound to its VRF by
 systemd's `BPFProgram=sock_create:`, not by an `LD_PRELOAD` shim. The mechanism,
 its verification and the pin lifecycle are in `design/process.md` §4. The
-shim (`vrf.o`), the per-instance `env` file and `--vrf-preload` go.
+shim (`vrf.o`), the per-instance `env` file and `--vrf-preload` are gone
+(2026-11-09): the template binds every instance, `default` included, and
+insomnia pins the program before it starts one. The `vrrp vrf <name>`
+config tree is what remains of this section.
 
 ### Mechanism
 
@@ -652,8 +654,8 @@ VRF instance.
 
 Per-instance directory layout with `TMPDIR` (§7), the template unit,
 compare-before-reload, a renderer that takes a subtree, and the show grammar as
-a grouping (§9). The `env` file and the `--vrf-preload` flag were prepared for
-the shim and go with it.
+a grouping (§9). The `env` file and the `--vrf-preload` flag, prepared for
+the shim, were removed with it.
 
 ## 14. Deferred, with reasons
 
