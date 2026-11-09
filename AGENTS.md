@@ -49,14 +49,17 @@ SIGHUP to `relay.pid` in that directory, and `--dhcp-relay-socket` (default
 Cucumber features drive real zebra-rs + insomnia (+ charon) inside Linux network
 namespaces. They need root-capable non-interactive `sudo`, an installed zebra-rs
 toolchain (`zebra-rs`, `vtyctl`, `vtyhelper`, YANG schemas), for IPsec features
-`charon-systemd` + `strongswan-swanctl`, and for VRRP features `keepalived`. They are
-never run by CI.
+`charon-systemd` + `strongswan-swanctl`, for VRRP features `keepalived`, and for DHCP
+features Kea (`kea-dhcp4-server`, `kea-dhcp6-server`) and `dhcpcd`. They are never run
+by CI. `design/dhcp-bdd.md` is the plan for the DHCP suite.
 
 ```sh
 make -C bdd stage            # build this worktree's insomnia + copy the zebra-rs toolchain into bdd/.stage/
 make -C bdd stage ZEBRA_PREFIX=../../zebra-rs/bdd/.stage   # test against an unreleased zebra-rs
 make -C bdd ipsec_s2s        # one feature (tag filter); every make target stages first
 make -C bdd vrrp_pair        # the VRRP master/backup feature (needs keepalived on the host)
+make -C bdd dhcp             # every DHCP feature (dhcp_relay, dhcpv6_relay, …)
+make -C bdd stage KEA_PREFIX=/path/to/unpacked-kea   # Kea from `dpkg-deb -x` of the Ubuntu packages
 make -C bdd run              # all features, serially
 make -C bdd all              # all features, 16 in parallel
 BDD_KEEP=1 make -C bdd ipsec_s2s   # leave namespaces/daemons up for inspection
@@ -67,7 +70,8 @@ make -C bdd docs             # regenerate bdd/docs/<feature>.md from feature fil
 Direct invocation from `bdd/` once staged:
 `cargo test --test cucumber -- --concurrency=1 --tags "@ipsec_s2s"`.
 Logs land in `bdd/logs/<tag>_<node>.log` (zebra-rs), `.insomnia.log`, `.charon.log`,
-`.keepalived.log`.
+`.keepalived.log`, `.relay.log` (the DHCP relay agent, debug level) and `.kea4.log` /
+`.kea6.log`.
 
 ### Packaging and releases
 
@@ -190,6 +194,13 @@ commit.
 - VRRP routers run via `bdd/tests/scripts/vrrp_node.sh` the same way: private `/run`, a
   keepalived started on an empty config, insomnia in signal mode. This keeps the routers
   clear of a keepalived service the development host itself may be running.
+- DHCP routers run via `bdd/tests/scripts/dhcp_node.sh` the same way: the relay agent
+  started on no config (`--pid-file`), zebra-rs, insomnia in signal mode. Standalone
+  servers run via `kea_server.sh`; clients are one `dhcpcd` run each through
+  `dhcp_client.sh` (private `/run`, its own config, lease variables from a dhcpcd hook),
+  asserted with the `DHCPv4/DHCPv6 client … should obtain an address in …` steps.
+  Gate the first `show` on `insomnia log … "show provider registered"`: the `show`
+  steps fail on the first connection error instead of retrying while zebra-rs starts.
 
 ## Conventions
 

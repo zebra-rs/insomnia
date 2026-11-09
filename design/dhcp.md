@@ -364,6 +364,20 @@ extends it with interface addresses (`RTMGRP_IPV4_IFADDR`,
 `RTMGRP_IPV6_IFADDR`); that is work item 3 in §17. Compare-before-reload
 (§8.2) keeps unrelated link churn from reloading Kea.
 
+**DHCPv6 needs the link-local address settled.** kea-dhcp6 joins ff02::1:2
+through a socket on each interface's link-local address. Started (or
+reloaded) while that address is still tentative, it fails the bind ("Failed
+to open multicast socket on interface s0, reason: Failed to open link-local
+socket"), does not retry, and silently serves unicast only: clients, and
+relays that send to ff02::1:2, get no answer. Found by the relay BDD suite
+(`design/dhcp-bdd.md` §10). An interface that has just appeared, come up or
+moved into a VRF is exactly in that state. So the renderer leaves an
+interface out of `interfaces-config` until its link-local address is no
+longer tentative, and adds it on the address event that follows. Kea's
+`service-sockets-max-retries` / `service-sockets-retry-wait-time` are the
+alternative, to check in the spike: whether they cover a tentative
+link-local.
+
 ### 7.4 Rendering `kea-dhcp6.conf`
 
 Follows `kea-dhcp6.conf.j2` and `kea6_parse_subnet` / `kea6_parse_options`.

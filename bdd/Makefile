@@ -29,6 +29,12 @@ ZEBRA_PREFIX ?= /usr
 # The zebra-rs side the features drive: the daemon, the CLI that applies
 # config and runs shows, and the helper the daemon spawns for the vty.
 ZEBRA_BINS := zebra-rs vtyctl vtyhelper
+# Optional: an unpacked copy of Ubuntu's Kea packages (dpkg-deb -x of
+# kea-common, kea-dhcp4-server, kea-dhcp6-server and liblog4cplus into one
+# directory), for hosts without Kea installed. Recorded in the stage as
+# `kea-prefix`, where tests/scripts/kea_server.sh finds it: the harness's
+# `sudo ip netns exec … env PATH=…` drops every other variable.
+KEA_PREFIX ?=
 
 # Every cucumber invocation goes through this, so staging can never be
 # skipped by running a target directly.
@@ -54,6 +60,7 @@ stage:
 	@install -m 0755 $(TARGET_DIR)/$(PROFILE)/insomnia $(TARGET_DIR)/$(PROFILE)/insomnia-dhcp-relay $(STAGE).tmp/bin/
 	@install -m 0755 $(addprefix $(ZEBRA_PREFIX)/bin/,$(ZEBRA_BINS)) $(STAGE).tmp/bin/
 	@install -m 0644 $(ZEBRA_PREFIX)/share/zebra-rs/yang/*.yang $(STAGE).tmp/share/zebra-rs/yang/
+	@if [ -n "$(KEA_PREFIX)" ]; then echo "$(abspath $(KEA_PREFIX))" >$(STAGE).tmp/kea-prefix; fi
 	@rm -rf $(STAGE)
 	@mv $(STAGE).tmp $(STAGE)
 	@echo "[staged $(PROFILE) insomnia + zebra-rs from $(ZEBRA_PREFIX) in $(CURDIR)/$(STAGE)]"
@@ -87,6 +94,22 @@ ipsec_s2s:
 vrrp_pair:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@vrrp_pair"
+
+# DHCP relay features: require Kea (apt install kea-dhcp4-server
+# kea-dhcp6-server, or stage with KEA_PREFIX=<unpacked packages>) and dhcpcd
+# on the host, and a zebra-rs with the `service` trees — see the feature
+# headers and tests/scripts/dhcp_node.sh. `dhcp` runs every DHCP feature.
+dhcp_relay:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_relay"
+
+dhcpv6_relay:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcpv6_relay"
+
+dhcp:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp"
 
 generate:
 	rm -rf allure-report
@@ -122,4 +145,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ipsec_s2s vrrp_pair generate open docs FORCE
+.PHONY: all run ipsec_s2s vrrp_pair dhcp_relay dhcpv6_relay dhcp generate open docs FORCE
