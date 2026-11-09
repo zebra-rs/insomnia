@@ -33,17 +33,30 @@
 //! warning naming the group — the rendered file is always syntactically
 //! valid keepalived config, so one bad group cannot wedge the whole
 //! commit.
+//!
+//! Per VRF (design/vrrp.md §13, design/process.md §4.9): the top level
+//! of the tree is the global table, and each `vrf <name>` entry is the
+//! same tree for a VRF, rendered into its own keepalived instance
+//! (`keepalived@<name>`, bound to the VRF by its unit's `BPFProgram=`).
+//! Every interface a group names — its `interface` and each address's
+//! and excluded address's `interface` — must be a member of the
+//! instance's VRF, or the group is skipped ("interface eth1 is in VRF
+//! default, not red"); an instance whose VRF does not exist is not
+//! started. The backend re-renders after every link change, and
+//! reloads only the instances whose file changed. `show vrrp vrf <name>
+//! …` reads that instance.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
-use crate::api::{JsonConfigUpdate, ShowRequest};
+use crate::api::ShowRequest;
 use crate::json::{Flex, de_flex_vec, de_presence};
 use crate::keepalived::{self, Applied, Keepalived};
+use crate::links::{Snapshot, missing_vrf_reason, reserved_vrf};
 use crate::text::{seconds_to_human, table};
 
 /// Running-config subtree this backend subscribes to.
@@ -52,31 +65,53 @@ const CONFIG_PATH: &[&str] = &["vrrp"];
 /// keepalived instance serving the global routing table.
 pub const DEFAULT_INSTANCE: &str = "default";
 
-/// What the task retains between commits: the last committed model,
-/// so `show vrrp` can list disabled groups the way VyOS does.
+/// What the task retains: the last committed tree (for `show vrrp`,
+/// which lists disabled groups the way VyOS does) and, per instance, the
+/// last file applied and its warnings, so link churn reloads nothing.
 #[derive(Default)]
-struct ShowState {
-    model: Option<VrrpConfig>,
+struct State {
+    tree: Option<VrrpTree>,
+    last: BTreeMap<String, String>,
+    warnings: BTreeMap<String, Vec<String>>,
+}
+
+/// `vrrp` or `vrrp vrf red`, for messages.
+fn scope(vrf: &str) -> String {
+    if vrf == DEFAULT_INSTANCE {
+        "vrrp".to_string()
+    } else {
+        format!("vrrp vrf {vrf}")
+    }
 }
 
 /// Backend task: a JSON subscription to `/vrrp` (snapshot first, then
-/// one whole-subtree batch per touching commit) selected with the show
-/// orders the provider routes here. Reconnects with backoff when the
-/// stream drops; the fresh snapshot re-renders keepalived.conf, and an
-/// unchanged file is not reloaded.
-pub async fn run(host: String, ka: Arc<Keepalived>, mut show_rx: mpsc::Receiver<ShowRequest>) {
-    let mut state = ShowState::default();
+/// one whole-subtree batch per touching commit), the link watcher, and
+/// the show orders the provider routes here. Reconnects with backoff
+/// when the stream drops; the fresh snapshot re-renders every instance,
+/// and an unchanged file is not reloaded.
+pub async fn run(
+    host: String,
+    ka: Arc<Keepalived>,
+    mut links: watch::Receiver<Arc<Snapshot>>,
+    mut show_rx: mpsc::Receiver<ShowRequest>,
+) {
+    let mut state = State::default();
     loop {
         let mut stream = crate::subscribe::subscribe_json(&host, CONFIG_PATH).await;
+        // A reconnect re-applies every instance.
+        state.last.clear();
         loop {
             tokio::select! {
                 msg = stream.message() => match msg {
                     Ok(Some(event)) => {
-                        let update = JsonConfigUpdate {
-                            path: CONFIG_PATH.iter().map(|s| s.to_string()).collect(),
-                            json: event.json,
-                        };
-                        process(update, &ka, &mut state).await;
+                        match serde_json::from_str::<VrrpTree>(&event.json) {
+                            Ok(tree) => {
+                                state.tree = Some(tree);
+                                let snapshot = links.borrow().clone();
+                                apply(&ka, &mut state, &snapshot).await;
+                            }
+                            Err(err) => tracing::error!("vrrp: config parse failed: {err}"),
+                        }
                     }
                     Ok(None) => break,
                     Err(err) => {
@@ -84,6 +119,14 @@ pub async fn run(host: String, ka: Arc<Keepalived>, mut show_rx: mpsc::Receiver<
                         break;
                     }
                 },
+                changed = links.changed() => {
+                    if changed.is_err() {
+                        // The watcher is gone; keep serving config events.
+                        std::future::pending::<()>().await;
+                    }
+                    let snapshot = links.borrow_and_update().clone();
+                    apply(&ka, &mut state, &snapshot).await;
+                }
                 Some(req) = show_rx.recv() => process_show(&ka, &state, req).await,
             }
         }
@@ -92,33 +135,81 @@ pub async fn run(host: String, ka: Arc<Keepalived>, mut show_rx: mpsc::Receiver<
     }
 }
 
-async fn process(update: JsonConfigUpdate, ka: &Keepalived, state: &mut ShowState) {
-    tracing::debug!("vrrp: config update for /{}", update.path.join("/"));
-    let cfg: VrrpConfig = match serde_json::from_str(&update.json) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            tracing::error!("vrrp: config parse failed: {err}");
-            return;
-        }
+/// Render every instance and apply those whose file changed; an
+/// instance whose `vrf` entry is gone gets the empty file (stop).
+async fn apply(ka: &Keepalived, state: &mut State, links: &Snapshot) {
+    let Some(tree) = &state.tree else {
+        return;
     };
-    let (conf, warnings) = render(&cfg);
-    for warn in &warnings {
-        tracing::warn!("vrrp: {warn}");
+    let mut renders: Vec<(String, String, Vec<String>)> = Vec::new();
+    for (vrf, cfg) in instances(tree) {
+        let (conf, mut warnings) = render_in(cfg, &vrf, Some(links));
+        if vrf == DEFAULT_INSTANCE && names_default_vrf(tree) {
+            warnings.push(reserved_vrf("vrrp"));
+        }
+        renders.push((vrf, conf, warnings));
     }
-    state.model = if cfg.is_empty() { None } else { Some(cfg) };
-    let paths = ka.instance(DEFAULT_INSTANCE);
-    match keepalived::apply(ka, DEFAULT_INSTANCE, &conf).await {
-        Ok(Applied::Loaded) => tracing::info!("vrrp: keepalived configuration loaded"),
-        Ok(Applied::Unchanged) => tracing::info!("vrrp: keepalived configuration unchanged"),
-        Ok(Applied::Stopped) => tracing::info!("vrrp: keepalived stopped (no configuration)"),
-        Ok(Applied::Held) => tracing::info!(
-            "vrrp: keepalived stopped by an operator (stop process); configuration written, not loaded"
-        ),
-        Ok(Applied::NotRunning) => tracing::warn!(
-            "vrrp: keepalived not running; configuration rendered to {} but not loaded",
-            paths.conf.display()
-        ),
-        Err(err) => tracing::error!("vrrp: keepalived apply failed: {err:#}"),
+    let wanted: Vec<String> = renders.iter().map(|(vrf, _, _)| vrf.clone()).collect();
+    for gone in state
+        .last
+        .keys()
+        .filter(|vrf| !wanted.contains(vrf))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        renders.push((gone, String::new(), Vec::new()));
+    }
+    for (vrf, conf, warnings) in renders {
+        let scope = scope(&vrf);
+        if state.warnings.get(&vrf) != Some(&warnings) {
+            for warn in &warnings {
+                // A warning about a `vrf` entry carries its own scope.
+                if warn.starts_with("vrrp vrf ") {
+                    tracing::warn!("{warn}");
+                } else {
+                    tracing::warn!("{scope}: {warn}");
+                }
+            }
+            state.warnings.insert(vrf.clone(), warnings);
+        }
+        if state.last.get(&vrf) == Some(&conf) {
+            continue;
+        }
+        // Nothing configured and nothing ever applied: leave it alone.
+        if conf.is_empty() && !state.last.contains_key(&vrf) && vrf != DEFAULT_INSTANCE {
+            continue;
+        }
+        let paths = ka.instance(&vrf);
+        match keepalived::apply(ka, &vrf, &conf).await {
+            Ok(applied) => {
+                match applied {
+                    Applied::Loaded => tracing::info!("{scope}: keepalived configuration loaded"),
+                    Applied::Unchanged => {
+                        tracing::info!("{scope}: keepalived configuration unchanged")
+                    }
+                    Applied::Stopped => {
+                        tracing::info!("{scope}: keepalived stopped (no configuration)")
+                    }
+                    Applied::Held => tracing::info!(
+                        "{scope}: keepalived stopped by an operator (stop process); configuration written, not loaded"
+                    ),
+                    Applied::NotRunning => tracing::warn!(
+                        "{scope}: keepalived not running; configuration rendered to {} but not loaded",
+                        paths.conf.display()
+                    ),
+                }
+                if conf.is_empty() && !wanted.contains(&vrf) {
+                    state.last.remove(&vrf);
+                    state.warnings.remove(&vrf);
+                } else {
+                    state.last.insert(vrf, conf);
+                }
+            }
+            Err(err) => {
+                tracing::error!("{scope}: keepalived apply failed: {err:#}");
+                state.last.remove(&vrf);
+            }
+        }
     }
 }
 
@@ -130,6 +221,45 @@ async fn process(update: JsonConfigUpdate, ka: &Keepalived, state: &mut ShowStat
 // scalars unquoted → `Flex`, `type empty` → null → `de_presence`,
 // keyed lists as arrays, leaf-lists via `de_flex_vec`).
 // ---------------------------------------------------------------
+
+/// The whole `/vrrp` subtree: the global table's tree, and one per
+/// `vrf <name>` entry.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct VrrpTree {
+    #[serde(flatten)]
+    pub default: VrrpConfig,
+    pub vrf: Vec<VrrpVrf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct VrrpVrf {
+    pub name: Option<Flex>,
+    #[serde(flatten)]
+    pub config: VrrpConfig,
+}
+
+/// Every instance: the global table first, then each `vrf` entry
+/// (`vrf default` excepted: the global table is the top level).
+pub fn instances(tree: &VrrpTree) -> Vec<(String, &VrrpConfig)> {
+    std::iter::once((DEFAULT_INSTANCE.to_string(), &tree.default))
+        .chain(
+            tree.vrf
+                .iter()
+                .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.config)))
+                .filter(|(name, _)| name != DEFAULT_INSTANCE),
+        )
+        .collect()
+}
+
+fn names_default_vrf(tree: &VrrpTree) -> bool {
+    tree.vrf.iter().any(|v| {
+        v.name
+            .as_ref()
+            .is_some_and(|n| n.to_string() == DEFAULT_INSTANCE)
+    })
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
@@ -406,9 +536,14 @@ struct Instance<'a> {
 fn check_group<'a>(
     cfg: &VrrpConfig,
     g: &'a Group,
+    vrf: &str,
+    links: Option<&Snapshot>,
     seen: &mut HashSet<(String, u8, Fam)>,
     r: &mut Render,
 ) -> Option<Instance<'a>> {
+    // The §4.9 rule: an interface the group names must be a member of
+    // the instance's VRF. `links` is `None` only in rendering tests.
+    let not_member = |dev: &str| links.and_then(|l| l.member(vrf, dev).err());
     let Some(name) = flex(&g.name) else {
         r.warn("group without a name; skipped".to_string());
         return None;
@@ -428,6 +563,9 @@ fn check_group<'a>(
     };
     if !safe_name(&interface) {
         return skip(r, "interface name is not a plain token");
+    }
+    if let Some(why) = not_member(&interface) {
+        return skip(r, &format!("interface {interface} {why}"));
     }
     let vrid = match flex(&g.vrid).and_then(|v| v.parse::<u8>().ok()) {
         Some(v) if v >= 1 => v,
@@ -457,6 +595,11 @@ fn check_group<'a>(
                 );
             }
             Some(_) => {}
+        }
+        if let Some(dev) = flex(&a.interface)
+            && let Some(why) = not_member(&dev)
+        {
+            return skip(r, &format!("address {text}: interface {dev} {why}"));
         }
         let dev = match flex(&a.interface) {
             Some(dev) if safe_name(&dev) => Some(dev),
@@ -493,6 +636,14 @@ fn check_group<'a>(
             continue;
         }
         let dev = flex(&a.interface).filter(|d| safe_name(d));
+        if let Some(dev) = &dev
+            && let Some(why) = not_member(dev)
+        {
+            return skip(
+                r,
+                &format!("excluded-address {text}: interface {dev} {why}"),
+            );
+        }
         evips.push((text, dev));
     }
 
@@ -933,15 +1084,29 @@ pub fn render_str(json: &str) -> anyhow::Result<(String, Vec<String>)> {
     Ok(render(&cfg))
 }
 
-/// Render the whole `keepalived.conf`. An empty tree (or a disabled
-/// one) renders the empty string, which [`keepalived::apply`] treats
-/// as "stop".
+/// The global table's `keepalived.conf`, without the membership check
+/// (the rendering tests' entry point).
+#[cfg(test)]
 pub fn render(cfg: &VrrpConfig) -> (String, Vec<String>) {
+    render_in(cfg, DEFAULT_INSTANCE, None)
+}
+
+/// Render the whole `keepalived.conf` of instance `vrf`. An empty tree
+/// (or a disabled one) renders the empty string, which
+/// [`keepalived::apply`] treats as "stop"; so does a VRF that does not
+/// exist. `links` decides VRF membership (`None`: not checked).
+pub fn render_in(cfg: &VrrpConfig, vrf: &str, links: Option<&Snapshot>) -> (String, Vec<String>) {
     let mut r = Render {
         out: String::new(),
         warnings: Vec::new(),
     };
     if cfg.is_empty() {
+        return (r.out, r.warnings);
+    }
+    if let Some(links) = links
+        && !links.has_vrf(vrf)
+    {
+        r.warn(missing_vrf_reason(vrf));
         return (r.out, r.warnings);
     }
 
@@ -968,7 +1133,7 @@ pub fn render(cfg: &VrrpConfig) -> (String, Vec<String>) {
     let instances: Vec<Instance> = cfg
         .group
         .iter()
-        .filter_map(|g| check_group(cfg, g, &mut seen, &mut r))
+        .filter_map(|g| check_group(cfg, g, vrf, links, &mut seen, &mut r))
         .collect();
     let names: HashSet<&str> = instances.iter().map(|i| i.name.as_str()).collect();
 
@@ -1074,30 +1239,54 @@ pub fn render(cfg: &VrrpConfig) -> (String, Vec<String>) {
 // show vrrp — keepalived's JSON dump rendered the VyOS way
 // ---------------------------------------------------------------
 
-async fn process_show(ka: &Keepalived, state: &ShowState, req: ShowRequest) {
-    let path = req.path.as_str();
-    // `/show/vrrp/<view>[/group]` with the group name in args.
-    let (view, filter) = match path {
-        "/show/vrrp" => ("summary", None),
-        "/show/vrrp/statistics" => ("statistics", None),
-        "/show/vrrp/statistics/group" => ("statistics", req.args.first().cloned()),
-        "/show/vrrp/detail" => ("detail", None),
-        "/show/vrrp/detail/group" => ("detail", req.args.first().cloned()),
-        _ => {
-            let _ = req.resp.send(String::from("% Unknown vrrp show command\n"));
-            return;
+/// `/show/vrrp[/vrf][/<view>][/group]` with the VRF and group names in
+/// `args`, in order: (instance, view, group filter).
+fn parse_show(path: &str, args: &[String]) -> Option<(String, &'static str, Option<String>)> {
+    let rest = path.strip_prefix("/show/vrrp")?;
+    let mut args = args.iter();
+    let mut vrf = DEFAULT_INSTANCE.to_string();
+    let mut view = "summary";
+    let mut group = None;
+    for seg in rest.split('/').filter(|s| !s.is_empty()) {
+        match seg {
+            "vrf" => vrf = args.next()?.clone(),
+            "statistics" => view = "statistics",
+            "detail" => view = "detail",
+            "group" => group = Some(args.next()?.clone()),
+            _ => return None,
         }
-    };
+    }
+    Some((vrf, view, group))
+}
 
-    let data = match keepalived::collect_json(ka, DEFAULT_INSTANCE).await {
+async fn process_show(ka: &Keepalived, state: &State, req: ShowRequest) {
+    let Some((vrf, view, filter)) = parse_show(&req.path, &req.args) else {
+        let _ = req.resp.send(String::from("% Unknown vrrp show command\n"));
+        return;
+    };
+    let model = state.tree.as_ref().and_then(|tree| {
+        instances(tree)
+            .into_iter()
+            .find(|(name, _)| *name == vrf)
+            .map(|(_, cfg)| cfg)
+            .filter(|cfg| !cfg.is_empty())
+    });
+    if vrf != DEFAULT_INSTANCE && model.is_none() {
+        let _ = req
+            .resp
+            .send(format!("VRRP is not configured for VRF {vrf}\n"));
+        return;
+    }
+
+    let data = match keepalived::collect_json(ka, &vrf).await {
         Ok(data) => data,
         Err(err) => {
             tracing::debug!("vrrp: {err}");
             // VyOS still lists disabled groups when keepalived has
             // nothing to say.
             let out = match (view, req.json) {
-                ("summary", false) if state.model.is_some() => {
-                    summary_text(&[], &disabled_rows(state.model.as_ref()), now_secs())
+                ("summary", false) if model.is_some() => {
+                    summary_text(&[], &disabled_rows(model), now_secs())
                 }
                 (_, true) => "[]\n".to_string(),
                 _ => format!("{err}\n"),
@@ -1127,7 +1316,7 @@ async fn process_show(ka: &Keepalived, state: &ShowState, req: ShowRequest) {
         format!("{:#}\n", serde_json::Value::Array(data))
     } else {
         match view {
-            "summary" => summary_text(&data, &disabled_rows(state.model.as_ref()), now_secs()),
+            "summary" => summary_text(&data, &disabled_rows(model), now_secs()),
             "statistics" => statistics_text(&data),
             _ => detail_text(&data),
         }
@@ -1481,6 +1670,105 @@ fn detail_text(data: &[serde_json::Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// eth0–eth1 in the global table; eth3–eth4 enslaved to VRF red.
+    fn vrf_links() -> Snapshot {
+        use crate::dhcp_server::tests::{link, snapshot};
+        let mut all = vec![link(2, "red", Some("vrf"), &[])];
+        all.push(link(10, "eth0", None, &[]));
+        all.push(link(11, "eth1", None, &[]));
+        for (i, name) in ["eth3", "eth4"].iter().enumerate() {
+            let (mut l, a) = link(20 + i as u32, name, None, &[]);
+            l.master = Some(2);
+            all.push((l, a));
+        }
+        snapshot(&all)
+    }
+
+    /// The `vrf` list as zebra-rs's `vrrp_json_marshal_contract`
+    /// delivers it, one instance per entry; `vrf default` is the global
+    /// table's name and never an instance.
+    #[test]
+    fn tree_and_instances() {
+        let tree: VrrpTree = serde_json::from_str(
+            r#"{"group": [{"name":"WAN","address": [{"address":"192.0.2.254/24"}],"interface":"eth0","vrid":10}],
+               "vrf": [{"name":"red","group": [{"name":"LAN","address": [{"address":"10.1.0.254/24"}],"interface":"eth3","vrid":10}]},
+                       {"name":"default","group": [{"name":"X","interface":"eth1","vrid":11}]}]}"#,
+        )
+        .unwrap();
+        let names: Vec<String> = instances(&tree).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["default", "red"]);
+        assert!(names_default_vrf(&tree));
+        let red = &instances(&tree)[1].1;
+        assert_eq!(red.group[0].name.as_ref().unwrap().to_string(), "LAN");
+    }
+
+    /// design/process.md §4.9: every interface a group names must be a
+    /// member of the instance's VRF, in both directions; a VRF that does
+    /// not exist renders nothing.
+    #[test]
+    fn vrf_membership() {
+        let links = vrf_links();
+        let cfg: VrrpConfig = serde_json::from_str(
+            r#"{"group": [
+                {"name":"OK","interface":"eth3","vrid":10,"address": [{"address":"10.1.0.254/24"},{"address":"10.4.0.254/24","interface":"eth4"}]},
+                {"name":"OUT","interface":"eth1","vrid":11,"address": [{"address":"192.0.2.254/24"}]},
+                {"name":"DEV","interface":"eth3","vrid":12,"address": [{"address":"192.0.2.253/24","interface":"eth0"}]},
+                {"name":"GONE","interface":"eth9","vrid":13,"address": [{"address":"10.1.0.253/24"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let (conf, warnings) = render_in(&cfg, "red", Some(&links));
+        assert!(conf.contains("vrrp_instance OK {"), "{conf}");
+        assert!(!conf.contains("OUT") && !conf.contains("DEV") && !conf.contains("GONE"));
+        assert_eq!(
+            warnings,
+            [
+                "group OUT: interface eth1 is in VRF default, not red; skipped",
+                "group DEV: address 192.0.2.253/24: interface eth0 is in VRF default, not red; skipped",
+                "group GONE: interface eth9 does not exist; skipped",
+            ]
+        );
+
+        // The global table: a red member is refused the other way round.
+        let cfg: VrrpConfig = serde_json::from_str(
+            r#"{"group": [{"name":"WAN","interface":"eth3","vrid":10,"address": [{"address":"192.0.2.254/24"}]}]}"#,
+        )
+        .unwrap();
+        let (conf, warnings) = render_in(&cfg, "default", Some(&links));
+        assert!(!conf.contains("vrrp_instance"));
+        assert_eq!(
+            warnings,
+            ["group WAN: interface eth3 is in VRF red, not default; skipped"]
+        );
+
+        let (conf, warnings) = render_in(&cfg, "blue", Some(&links));
+        assert_eq!(conf, "");
+        assert_eq!(warnings, ["VRF blue does not exist; not started"]);
+    }
+
+    #[test]
+    fn show_paths() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_show("/show/vrrp", &[]),
+            Some(("default".to_string(), "summary", None))
+        );
+        assert_eq!(
+            parse_show("/show/vrrp/detail/group", &args(&["WAN"])),
+            Some(("default".to_string(), "detail", Some("WAN".to_string())))
+        );
+        assert_eq!(
+            parse_show("/show/vrrp/vrf", &args(&["red"])),
+            Some(("red".to_string(), "summary", None))
+        );
+        assert_eq!(
+            parse_show("/show/vrrp/vrf/statistics/group", &args(&["red", "LAN"])),
+            Some(("red".to_string(), "statistics", Some("LAN".to_string())))
+        );
+        assert_eq!(parse_show("/show/vrrp/vrf", &[]), None);
+        assert_eq!(parse_show("/show/vrrpx", &[]), None);
+    }
 
     /// Presence leaves arrive as `"name": null`; numeric-looking
     /// values arrive as JSON numbers; leaf-lists may be bare scalars.

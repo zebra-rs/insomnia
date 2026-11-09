@@ -1,8 +1,10 @@
 # VRRP (VyOS-derived `vrrp` tree) — design
 
 Status: implemented for the default VRF on 2026-09-07 (insomnia branch
-`vrrp-backend`, zebra-rs branch `vrrp`; BDD feature `vrrp_pair` green). The
-per-VRF expansion in §13 remains a proposal.
+`vrrp-backend`, zebra-rs branch `vrrp`; BDD feature `vrrp_pair` green), and
+per VRF (§13) on 2026-11-09 (insomnia and zebra-rs branches `vrrp-vrf`; BDD
+feature `vrrp_vrf` green, `vrf_units.sh` runs `keepalived@red` under
+systemd).
 
 insomnia gains a third backend next to firewall and IPsec: it subscribes to the
 `vrrp` running-config subtree, renders it into a `keepalived.conf`,
@@ -539,10 +541,10 @@ against the host keepalived:
 - Two nodes on a Linux bridge see each other's multicast advertisements
   (224.0.0.18 is link-local and always flooded; confirm with snooping enabled).
 
-## 13. Running VRRP in a VRF (future expansion)
+## 13. Running VRRP in a VRF
 
-Not in the first release, but the first release is laid out so that adding it
-changes no paths and no plumbing. Decision (2026-09-07): **one keepalived
+Implemented 2026-11-09 (notes at the end of this section). The first release
+was laid out so that adding it changed no paths and no plumbing. Decision (2026-09-07): **one keepalived
 process per VRF.** keepalived is not relied on to be VRF-aware. (keepalived
 2.2.8 does carry partial VRF handling — it enslaves a VMAC it creates to the
 parent's VRF master and binds source-bound unicast sockets to the VRF,
@@ -659,6 +661,34 @@ Per-instance directory layout with `TMPDIR` (§7), the template unit,
 compare-before-reload, a renderer that takes a subtree, and the show grammar as
 a grouping (§9). The `env` file and the `--vrf-preload` flag, prepared for
 the shim, were removed with it.
+
+### As built (2026-11-09)
+
+- **Schema:** `vrrp vrf <name> …` reuses `grouping vrrp`; `vrrp vrf default`
+  is refused at commit (`design/process.md` §4.9).
+- **Rendering:** each instance renders with the same renderer
+  (`vrrp::render_in(cfg, vrf, links)`). The §4.9 rule is enforced per group:
+  the group's `interface`, and each address's and excluded address's
+  `interface`, must be members of the instance's VRF, or the group is
+  skipped ("group LAN: interface d1 is in VRF default, not red; skipped").
+  The global table's groups follow it too, so a group on an interface
+  enslaved to a VRF is skipped there. A VRF that does not exist renders
+  nothing ("vrrp vrf red: VRF red does not exist; not started"). `track
+  interface` is not checked: it watches link state only.
+- **Applying:** the backend re-renders after every commit and link change and
+  applies only the instances whose file changed; an instance whose `vrf`
+  entry is gone gets the empty file (stopped). Messages are scoped: `vrrp:` for
+  the global table, `vrrp vrf red:` for a VRF.
+- **Show:** `show vrrp vrf <name> [statistics | detail] [group <name>]`; a VRF
+  with no configuration answers "VRRP is not configured for VRF <name>".
+- **Tests:** the `vrrp_vrf` BDD feature runs a group in VRF red beside one in
+  the global table on the same two routers (keepalived under `ip vrf exec`):
+  election, the VIP and its route only in red's table, per-instance show and
+  `show process`, failover inside red leaving the global group alone, a group
+  on a non-member interface skipped, and `delete vrrp vrf red` stopping only
+  red's instance. `bdd/tests/scripts/vrf_units.sh` runs the shipped
+  `insomnia-keepalived@.service` for `red` under systemd: active with the
+  program attached, holding the VIP, and back after the VRF is re-created.
 
 ## 14. Deferred, with reasons
 

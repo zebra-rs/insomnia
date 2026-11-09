@@ -6,10 +6,12 @@
 # exits 0 — the "I execute" step treats a non-zero exit as a scenario
 # failure, and an already-gone daemon is fine at teardown.
 NS="$1"
-for d in insomnia keepalived; do
-    if [ -f "/tmp/$NS.$d.pid" ]; then
-        kill "$(cat "/tmp/$NS.$d.pid")" 2>/dev/null
-        rm -f "/tmp/$NS.$d.pid"
+# insomnia, the default instance's keepalived, and every per-VRF one
+# (vrrp_node.sh … keepalived-vrf VRF).
+for f in "/tmp/$NS.insomnia.pid" /tmp/"$NS".keepalived*.pid; do
+    if [ -f "$f" ]; then
+        kill "$(cat "$f")" 2>/dev/null
+        rm -f "$f"
     fi
 done
 exit 0

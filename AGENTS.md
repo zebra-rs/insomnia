@@ -70,6 +70,7 @@ make -C bdd stage            # build this worktree's insomnia + copy the zebra-r
 make -C bdd stage ZEBRA_PREFIX=../../zebra-rs/bdd/.stage   # test against an unreleased zebra-rs
 make -C bdd ipsec_s2s        # one feature (tag filter); every make target stages first
 make -C bdd vrrp_pair        # the VRRP master/backup feature (needs keepalived on the host)
+make -C bdd vrrp_vrf         # VRRP in a VRF beside the global table
 make -C bdd dhcp             # every DHCP feature (dhcp_server, dhcpv6_server, dhcp_server_relay,
                              #   dhcp_server_vrf, dhcp_vrf_e2e, dhcp_relay, dhcpv6_relay, dhcp_relay_vrf)
 make -C bdd stage KEA_PREFIX=/path/to/unpacked-kea   # Kea from `dpkg-deb -x` of the Ubuntu packages
@@ -206,7 +207,8 @@ Firewall show answers from the last committed model plus live counters fetched f
 `nft --json list table`. IPsec show reads live state from charon via `src/vici.rs` (a minimal VICI client
 implementing only the `list-sas` / `list-conns` command-event streaming pattern) and
 from `ip xfrm` for state/policy. VRRP show sends keepalived its JSON signal and reads
-the dump from the instance directory (`src/keepalived.rs`); the summary appends
+the dump from the instance directory (`src/keepalived.rs`; `show vrrp vrf <name>` reads
+that VRF's instance); the summary appends
 `DISABLED` rows from the last committed model. DHCP relay show asks the relay agent's
 control socket for its counters (`src/relayd.rs`). DHCP server show asks the instance's
 Kea (`lease{4,6}-get-all`, `stat-lease{4,6}-get`) and maps subnet ids to shared networks
@@ -249,6 +251,8 @@ commit.
 - VRRP routers run via `bdd/tests/scripts/vrrp_node.sh` the same way: private `/run`, a
   keepalived started on an empty config, insomnia in signal mode. This keeps the routers
   clear of a keepalived service the development host itself may be running.
+  `vrrp_node.sh NS keepalived-vrf VRF` starts a VRF's keepalived under `ip vrf exec`
+  once zebra-rs has created the VRF (`vrrp_vrf` feature).
 - The systemd side (VRF pins, template units, holds) is not BDD: `sudo
   bdd/tests/scripts/vrf_units.sh bdd/.stage <unpacked-kea>` runs zebra-rs and insomnia
   in a scratch namespace in systemd mode against the host's systemd, with the shipped

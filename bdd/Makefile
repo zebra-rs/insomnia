@@ -95,6 +95,10 @@ vrrp_pair:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@vrrp_pair"
 
+vrrp_vrf:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@vrrp_vrf"
+
 # DHCP server and relay features: require Kea (apt install kea-dhcp4-server
 # kea-dhcp6-server, or stage with KEA_PREFIX=<unpacked packages>) and dhcpcd
 # on the host, and a zebra-rs with the `service` trees — see the feature
@@ -169,4 +173,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ipsec_s2s vrrp_pair dhcp_server dhcpv6_server dhcp_server_relay dhcp_server_vrf dhcp_vrf_e2e dhcp_relay dhcpv6_relay dhcp_relay_vrf dhcp generate open docs FORCE
+.PHONY: all run ipsec_s2s vrrp_pair vrrp_vrf dhcp_server dhcpv6_server dhcp_server_relay dhcp_server_vrf dhcp_vrf_e2e dhcp_relay dhcpv6_relay dhcp_relay_vrf dhcp generate open docs FORCE
