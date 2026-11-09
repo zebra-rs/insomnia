@@ -11,8 +11,9 @@ DEB_VERSION_ARG := $(if $(DEB_VERSION),--deb-version "$(DEB_VERSION)",)
 # and `arm64` are the same recipe run on the matching native runner; both
 # targets exist so the CI matrix can name an arch explicitly.
 #
-# `cargo build --release` builds the insomnia and insomnia-dhcp-relay
-# binaries; `cargo deb --no-build` then packages them plus the systemd units.
+# `cargo build --release` builds the insomnia, insomnia-kea-notify and
+# insomnia-dhcp-relay binaries; `cargo deb --no-build` then packages them
+# plus the systemd units.
 # The .deb lands here (--output .) as insomnia_<version>_<arch>.deb.
 arm64 amd64: changelog
 	cargo build --release -p insomnia -p dhcp-relay

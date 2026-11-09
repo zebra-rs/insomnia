@@ -57,7 +57,7 @@ stage:
 	    echo "error: $(ZEBRA_PREFIX)/share/zebra-rs/yang not found"; exit 1; }
 	@rm -rf $(STAGE).tmp
 	@mkdir -p $(STAGE).tmp/bin $(STAGE).tmp/share/zebra-rs/yang
-	@install -m 0755 $(TARGET_DIR)/$(PROFILE)/insomnia $(TARGET_DIR)/$(PROFILE)/insomnia-dhcp-relay $(STAGE).tmp/bin/
+	@install -m 0755 $(TARGET_DIR)/$(PROFILE)/insomnia $(TARGET_DIR)/$(PROFILE)/insomnia-dhcp-relay $(TARGET_DIR)/$(PROFILE)/insomnia-kea-notify $(STAGE).tmp/bin/
 	@install -m 0755 $(addprefix $(ZEBRA_PREFIX)/bin/,$(ZEBRA_BINS)) $(STAGE).tmp/bin/
 	@install -m 0644 $(ZEBRA_PREFIX)/share/zebra-rs/yang/*.yang $(STAGE).tmp/share/zebra-rs/yang/
 	@if [ -n "$(KEA_PREFIX)" ]; then echo "$(abspath $(KEA_PREFIX))" >$(STAGE).tmp/kea-prefix; fi
@@ -95,10 +95,30 @@ vrrp_pair:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@vrrp_pair"
 
-# DHCP relay features: require Kea (apt install kea-dhcp4-server
+# DHCP server and relay features: require Kea (apt install kea-dhcp4-server
 # kea-dhcp6-server, or stage with KEA_PREFIX=<unpacked packages>) and dhcpcd
 # on the host, and a zebra-rs with the `service` trees — see the feature
 # headers and tests/scripts/dhcp_node.sh. `dhcp` runs every DHCP feature.
+dhcp_server:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_server"
+
+dhcpv6_server:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcpv6_server"
+
+dhcp_server_relay:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_server_relay"
+
+dhcp_server_vrf:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_server_vrf"
+
+dhcp_vrf_e2e:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_vrf_e2e"
+
 dhcp_relay:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_relay"
@@ -106,6 +126,10 @@ dhcp_relay:
 dhcpv6_relay:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@dhcpv6_relay"
+
+dhcp_relay_vrf:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@dhcp_relay_vrf"
 
 dhcp:
 	mkdir -p allure-results
@@ -145,4 +169,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ipsec_s2s vrrp_pair dhcp_relay dhcpv6_relay dhcp generate open docs FORCE
+.PHONY: all run ipsec_s2s vrrp_pair dhcp_server dhcpv6_server dhcp_server_relay dhcp_server_vrf dhcp_vrf_e2e dhcp_relay dhcpv6_relay dhcp_relay_vrf dhcp generate open docs FORCE

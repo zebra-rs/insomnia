@@ -3328,9 +3328,10 @@ fn dhcp_diagnostics(world: &World) -> String {
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .filter(|n| {
                     n.starts_with(&prefix)
-                        && [".relay.log", ".kea4.log", ".kea6.log"]
+                        && n.ends_with(".log")
+                        && [".relay.", ".kea4", ".kea6", ".insomnia."]
                             .iter()
-                            .any(|s| n.ends_with(s))
+                            .any(|s| n.contains(s))
                 })
                 .map(|n| format!("logs/{}", n))
                 .collect()
@@ -3505,6 +3506,80 @@ async fn dhcp6_with_obtains(
     spec: String,
 ) {
     dhcp_should_obtain(world, 6, Some(conf), iface, namespace, spec).await;
+}
+
+/// A delegated prefix in `spec`: dhcpcd reports each one as
+/// `dhcp6_ia_pd<n>_prefix<m>` (with `_length` beside it).
+async fn dhcp_should_obtain_prefix(
+    world: &mut World,
+    conf: Option<String>,
+    iface: String,
+    namespace: String,
+    spec: String,
+) {
+    let conf = match conf {
+        Some(extra) => format!("ia_pd 1;{}", extra),
+        None => "ia_pd 1".to_string(),
+    };
+    let run = run_dhcp_client(world, &namespace, &iface, 6, Some(&conf), 25).await;
+    let key = format!("{}/{}/6", world.ns(&namespace), iface);
+    let prefix = |k: &str| {
+        k.contains("ia_pd")
+            && k.rsplit('_').next().is_some_and(|last| {
+                last.strip_prefix("prefix")
+                    .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+            })
+    };
+    let hit = run
+        .lease
+        .iter()
+        .find(|(k, v)| prefix(k) && address_in(v, &spec))
+        .map(|(k, v)| {
+            let len = run
+                .lease
+                .iter()
+                .find(|(lk, _)| *lk == format!("{}_length", k))
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default();
+            format!("{}/{}", v, len)
+        });
+    world.dhcp_runs.insert(key, run.clone());
+    match hit {
+        Some(p) if run.obtained => {
+            println!(
+                "✓ DHCPv6 client {}:{} obtained prefix {}",
+                namespace, iface, p
+            )
+        }
+        _ => panic!(
+            "DHCPv6 client on {} in {} did not obtain a prefix in {}\n{}\n{}",
+            iface,
+            world.ns(&namespace),
+            spec,
+            run.raw,
+            dhcp_diagnostics(world)
+        ),
+    }
+}
+
+#[then(
+    expr = "DHCPv6 client on interface {string} in namespace {string} should obtain a prefix in {string}"
+)]
+async fn dhcp6_obtains_prefix(world: &mut World, iface: String, namespace: String, spec: String) {
+    dhcp_should_obtain_prefix(world, None, iface, namespace, spec).await;
+}
+
+#[then(
+    expr = "DHCPv6 client with {string} on interface {string} in namespace {string} should obtain a prefix in {string}"
+)]
+async fn dhcp6_with_obtains_prefix(
+    world: &mut World,
+    conf: String,
+    iface: String,
+    namespace: String,
+    spec: String,
+) {
+    dhcp_should_obtain_prefix(world, Some(conf), iface, namespace, spec).await;
 }
 
 #[then(

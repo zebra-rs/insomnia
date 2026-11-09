@@ -6,12 +6,7 @@
 # config, Kea's lock and pid files and the DHCPv6 data directory.
 # Logging goes to stdout, appended to logs/NS.kea4.log / kea6.log.
 #
-# Kea comes from the host (apt install kea-dhcp4-server kea-dhcp6-server)
-# or, when `make -C bdd stage KEA_PREFIX=<tree>` recorded an unpacked
-# copy of the Ubuntu packages, from that tree. The harness reaches this
-# script through `sudo ip netns exec … env PATH=<stage>/bin:…`, which
-# drops every other environment variable, so the prefix travels in the
-# stage directory rather than in the environment.
+# Kea comes from the host or a staged KEA_PREFIX tree (kea_env.sh).
 set -e
 
 NS="$1" FAMILY="$2" CONFIG="$3"
@@ -23,18 +18,12 @@ case "$FAMILY" in
     ;;
 esac
 
-STAGE_BIN="$(dirname "$(command -v insomnia)")"
-LIBS=""
-if [ -s "$STAGE_BIN/../kea-prefix" ]; then
-    KP="$(cat "$STAGE_BIN/../kea-prefix")"
-    BIN="$KP/usr/sbin/kea-dhcp$FAMILY"
-    LIBS="$(dirname "$(ls "$KP"/usr/lib/*/libkea-dhcpsrv.so.* | head -1)")"
-else
-    BIN="$(command -v "kea-dhcp$FAMILY")" || {
-        echo "kea_server: kea-dhcp$FAMILY not installed on this host (or stage with KEA_PREFIX=…)" >&2
-        exit 1
-    }
-fi
+. "$(dirname "$0")/kea_env.sh"
+BIN="$KEA_SBIN/kea-dhcp$FAMILY"
+[ -x "$BIN" ] || {
+    echo "kea_server: $BIN not installed on this host (or stage with KEA_PREFIX=…)" >&2
+    exit 1
+}
 
 if [ "$FAMILY" = 6 ]; then
     # kea-dhcp6 joins ff02::1:2 through a socket on each interface's
@@ -50,6 +39,7 @@ fi
 DIR="/tmp/$NS.kea"
 mkdir -p "$DIR"
 sed "s|@DIR@|$DIR|g" "$CONFIG" >"$DIR/kea$FAMILY.json"
-setsid env ${LIBS:+LD_LIBRARY_PATH=$LIBS} KEA_LOCKFILE_DIR="$DIR" KEA_PIDFILE_DIR="$DIR" \
+# shellcheck disable=SC2086 # KEA_ENV is a list of assignments
+setsid env $KEA_ENV KEA_LOCKFILE_DIR="$DIR" KEA_PIDFILE_DIR="$DIR" \
     "$BIN" -c "$DIR/kea$FAMILY.json" >>"logs/$NS.kea$FAMILY.log" 2>&1 </dev/null &
 echo $! >"/tmp/$NS.kea$FAMILY.pid"

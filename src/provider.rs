@@ -19,8 +19,10 @@ pub struct Backends {
     pub firewall: mpsc::Sender<ShowRequest>,
     pub ipsec: mpsc::Sender<ShowRequest>,
     pub vrrp: mpsc::Sender<ShowRequest>,
-    /// `show dhcp …` and `show dhcpv6 …` (the relay backend).
+    /// `show dhcp relay …` and `show dhcpv6 relay …` (the relay backend).
     pub dhcp: mpsc::Sender<ShowRequest>,
+    /// `show dhcp server …` and `show dhcpv6 server …` (the Kea backend).
+    pub dhcp_server: mpsc::Sender<ShowRequest>,
 }
 
 impl Backends {
@@ -32,6 +34,8 @@ impl Backends {
             Some(&self.ipsec)
         } else if path.starts_with("/show/vrrp") {
             Some(&self.vrrp)
+        } else if path.starts_with("/show/dhcp/server") || path.starts_with("/show/dhcpv6/server") {
+            Some(&self.dhcp_server)
         } else if path.starts_with("/show/dhcp") {
             // Also `/show/dhcpv6`.
             Some(&self.dhcp)

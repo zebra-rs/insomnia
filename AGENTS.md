@@ -4,16 +4,19 @@ This file provides guidance to coding agents including Claude Code (claude.ai/co
 
 ## What insomnia is
 
-insomnia is the out-of-process firewall / IPsec / VRRP / DHCP relay enforcement
-daemon for zebra-rs. zebra-rs owns the configuration (YANG schema, candidate/running
-stores, commit); insomnia enforces it. It subscribes to the `firewall`, `vpn ipsec`,
-`vrrp`, `service dhcp-relay` and `service dhcpv6-relay` running-config subtrees over
-gRPC, renders them into nftables, strongSwan (swanctl), keepalived and
+insomnia is the out-of-process firewall / IPsec / VRRP / DHCP server and relay
+enforcement daemon for zebra-rs. zebra-rs owns the configuration (YANG schema,
+candidate/running stores, commit); insomnia enforces it. It subscribes to the
+`firewall`, `vpn ipsec`, `vrrp`, `service dhcp-server`, `service dhcpv6-server`,
+`service dhcp-relay` and `service dhcpv6-relay` running-config subtrees over gRPC,
+renders them into nftables, strongSwan (swanctl), keepalived, Kea and
 insomnia-dhcp-relay state, and registers as the show provider so `show firewall …`,
-`show vpn ipsec …`, `show vrrp …` and `show dhcp[v6] relay statistics` typed at the
-zebra-rs CLI are answered by this process. The DHCP relay agent itself,
-`insomnia-dhcp-relay`, is a second binary in this workspace (`dhcp-relay/`, with the
-packet codec in `dhcp-packet/`). The backends were moved out of the zebra-rs
+`show vpn ipsec …`, `show vrrp …`, `show dhcp[v6] server …` and
+`show dhcp[v6] relay statistics` typed at the zebra-rs CLI are answered by this
+process. The DHCP relay agent itself, `insomnia-dhcp-relay`, is a second binary in this
+workspace (`dhcp-relay/`, with the packet codec in `dhcp-packet/`); `kea-notify`
+(`src/bin/insomnia-kea-notify.rs`) is the tiny program Kea's run_script hook calls for
+DHCPv6 lease events. The backends were moved out of the zebra-rs
 tree, not rewritten — `src/api.rs` deliberately mirrors the in-process channel types they
 used to consume.
 
@@ -42,7 +45,13 @@ instance's pid file (what the BDD harness uses). The DHCP relay backend writes
 `--dhcp-relay-control systemd|signal` picks between `insomnia-dhcp-relay.service` and
 SIGHUP to `relay.pid` in that directory, and `--dhcp-relay-socket` (default
 `/run/insomnia-dhcp-relay/control`) is the agent's control socket that
-`show dhcp relay statistics` queries.
+`show dhcp relay statistics` queries. The DHCP server backend drives one Kea per family
+per VRF: `--kea-dir` (default `/run/insomnia/kea`) holds `<vrf>/kea-dhcp{4,6}.conf`, the
+control sockets and the `kea-notify` link; `--kea-state-dir` (default
+`/var/lib/insomnia/kea`) the leases; `--kea-control systemd|socket` picks between the
+`insomnia-kea-dhcp{4,6}@<vrf>.service` template units and talking only to instances
+somebody else started (the BDD harness); `--kea-hooks-dir` defaults to
+`/usr/lib/<multiarch>/kea/hooks`.
 
 ### BDD integration tests (`bdd/`)
 
@@ -58,7 +67,8 @@ make -C bdd stage            # build this worktree's insomnia + copy the zebra-r
 make -C bdd stage ZEBRA_PREFIX=../../zebra-rs/bdd/.stage   # test against an unreleased zebra-rs
 make -C bdd ipsec_s2s        # one feature (tag filter); every make target stages first
 make -C bdd vrrp_pair        # the VRRP master/backup feature (needs keepalived on the host)
-make -C bdd dhcp             # every DHCP feature (dhcp_relay, dhcpv6_relay, …)
+make -C bdd dhcp             # every DHCP feature (dhcp_server, dhcpv6_server, dhcp_server_relay,
+                             #   dhcp_server_vrf, dhcp_vrf_e2e, dhcp_relay, dhcpv6_relay, dhcp_relay_vrf)
 make -C bdd stage KEA_PREFIX=/path/to/unpacked-kea   # Kea from `dpkg-deb -x` of the Ubuntu packages
 make -C bdd run              # all features, serially
 make -C bdd all              # all features, 16 in parallel
@@ -71,7 +81,8 @@ Direct invocation from `bdd/` once staged:
 `cargo test --test cucumber -- --concurrency=1 --tags "@ipsec_s2s"`.
 Logs land in `bdd/logs/<tag>_<node>.log` (zebra-rs), `.insomnia.log`, `.charon.log`,
 `.keepalived.log`, `.relay.log` (the DHCP relay agent, debug level) and `.kea4.log` /
-`.kea6.log`.
+`.kea6.log` (a standalone server's Kea, or the router's default-VRF Kea; per-VRF router
+instances log to `.kea4-<vrf>.log`).
 
 ### Packaging and releases
 
@@ -94,24 +105,29 @@ The `book/` directory is an mdBook (`mdbook build` inside `book/`; output is git
 
 ### Process layout (`src/main.rs`)
 
-Five long-lived tokio tasks share one `--host`:
+Six long-lived tokio tasks share one `--host`, plus the kernel link watcher:
 
-- `firewall::run`, `ipsec::run`, `vrrp::run` and `dhcp_relay::run` — one backend task
-  per config subtree (the DHCP relay task subscribes to both relay subtrees and renders
-  nothing until both snapshots have arrived).
+- `firewall::run`, `ipsec::run`, `vrrp::run`, `dhcp_relay::run` and `dhcp_server::run` —
+  one backend task per config subtree (the DHCP relay task subscribes to both relay
+  subtrees and renders nothing until both snapshots have arrived; the DHCP server task
+  subscribes to both server subtrees and also re-renders on link and address changes).
+- `links::spawn` — a NETLINK_ROUTE watcher (links, addresses, VRF masters, the tentative
+  flag) publishing a fresh `links::Snapshot` on a `watch` channel after each burst of
+  kernel events; Kea's listen set is derived from it.
 - `provider::run` — registers the `firewall`, `ipsec`, `vrrp` and `dhcp` show trees with
   zebra-rs and routes each `ShowOrder` by path prefix (`/show/firewall` → firewall,
-  `/show/vpn/ipsec` → ipsec, `/show/vrrp` → vrrp, `/show/dhcp` and `/show/dhcpv6` →
-  dhcp_relay) over an mpsc channel carrying `api::ShowRequest`. Each request holds a
+  `/show/vpn/ipsec` → ipsec, `/show/vrrp` → vrrp, `/show/dhcp[v6]/server` →
+  dhcp_server, the rest of `/show/dhcp` and `/show/dhcpv6` → dhcp_relay) over an mpsc
+  channel carrying `api::ShowRequest`. Each request holds a
   oneshot; every order must be answered exactly once, and a dropped oneshot is turned into
   an error chunk so the CLI never hangs.
 
 Every connection retries forever with `endpoint::RECONNECT_DELAY`: zebra-rs restarting is
 a normal condition. Do not turn connection failures into exits.
 
-### Backend shape (`src/firewall.rs`, `src/ipsec.rs`, `src/vrrp.rs`, `src/dhcp_relay.rs`)
+### Backend shape (`src/firewall.rs`, `src/ipsec.rs`, `src/vrrp.rs`, `src/dhcp_relay.rs`, `src/dhcp_server.rs`)
 
-All four backends have the same structure, and new backends should keep it:
+All five backends have the same structure, and new backends should keep it:
 
 1. `subscribe::subscribe_json` opens a JSON-format `zebra.config.v1` subscription. The
    first event is always a snapshot of the whole subtree, then one whole-subtree document
@@ -119,7 +135,7 @@ All four backends have the same structure, and new backends should keep it:
    resyncs by simply re-applying the snapshot; applies must be idempotent.
 2. A `run` loop `select!`s between stream events and show requests.
 3. The JSON deserializes into a serde model (`FirewallConfig` / `IpsecConfig` /
-   `VrrpConfig` / `Relay4Tree` + `Relay6Tree`).
+   `VrrpConfig` / `Relay4Tree` + `Relay6Tree` / `Server4Tree` + `Server6Tree`).
 4. `render(&cfg) -> (text, warnings)` produces a complete artifact: a full nft script
    (starting with add+delete of the `zebra_firewall` tables, so replace and teardown are
    one atomic `nft -f -` transaction), a full `swanctl.conf` loaded with `swanctl -q`, or
@@ -127,13 +143,21 @@ All four backends have the same structure, and new backends should keep it:
    `Relayd::apply`. Both go through `process::reload`: compare-before-reload, then
    `systemctl reload-or-restart`/`stop` on the unit or SIGHUP to the pid file.
    `relay.json` is built from the agent's own types (`dhcp_relay::config`, the
-   `dhcp-relay` crate's library), so the two cannot drift apart.
+   `dhcp-relay` crate's library), so the two cannot drift apart. The DHCP server renders
+   one complete Kea configuration per family per VRF (`dhcp4::render`, `dhcp6::render`,
+   with the instance's VRF, interfaces and paths in a `dhcp_server::Context`) and hands it
+   to `kea::Kea::apply`: compare with the file in place, `config-test` over the control
+   socket, write, `config-reload` — a commit never restarts Kea, and a configuration Kea
+   refuses leaves it running the previous one (shown as stale). DHCPv6 delegated
+   prefixes get `proto dhcp` routes from `pd_routes.rs`, triggered by kea-notify and
+   confirmed with `lease6-get`.
 5. Anything the renderer cannot express safely is skipped with a warning naming the
    rule/peer. Rendered output must always be syntactically valid; one bad rule must never
    wedge the whole commit.
 
 The renderers follow the VyOS templates line for line (vyos-1x `nftables.j2`,
-`swanctl.conf.j2`, `keepalived.conf.j2`, `dhcrelay{,6}.conf.j2`); each module doc lists
+`swanctl.conf.j2`, `keepalived.conf.j2`, `dhcrelay{,6}.conf.j2`, `kea-dhcp{4,6}.conf.j2`
+with `python/vyos/kea.py`); each module doc lists
 the deliberate deviations (table/chain naming `zebra_firewall` / `ZEBRA_*` so it coexists with VyOS, unapplied
 sysctl/charon-level options, VRRP transition scripts as native `notify_*` lines, the
 three FRR-derived VRRP extension leaves, etc.). `design/vrrp.md` is the VRRP design and
@@ -157,7 +181,9 @@ implementing only the `list-sas` / `list-conns` command-event streaming pattern)
 from `ip xfrm` for state/policy. VRRP show sends keepalived its JSON signal and reads
 the dump from the instance directory (`src/keepalived.rs`); the summary appends
 `DISABLED` rows from the last committed model. DHCP relay show asks the relay agent's
-control socket for its counters (`src/relayd.rs`). `ShowRequest.json` selects JSON
+control socket for its counters (`src/relayd.rs`). DHCP server show asks the instance's
+Kea (`lease{4,6}-get-all`, `stat-lease{4,6}-get`) and maps subnet ids to shared networks
+with the last configuration Kea accepted; static mappings come from that configuration. `ShowRequest.json` selects JSON
 output (`vtyctl show -j`).
 
 ### Vendored protos (`proto/`)
@@ -171,9 +197,11 @@ with zebra-rs rather than diverging locally.
 
 Unit tests are inline `#[cfg(test)]` modules. The core ones are golden-render tests: a
 JSON config string goes through the `cfg(test)`-only `render_str` helper and the exact
-nft / swanctl / keepalived text (and warning list) is asserted. None of `nft`, `swanctl`
-or `keepalived` is needed; the VRRP show tests use a keepalived JSON dump captured in a
-scratch namespace.
+nft / swanctl / keepalived / Kea text (and warning list) is asserted. None of `nft`,
+`swanctl`, `keepalived` or Kea is needed; the VRRP show tests use a keepalived JSON dump
+captured in a scratch namespace, and the DHCP server show tests Kea 2.4.1 replies. The Kea
+goldens were also checked with `kea-dhcp{4,6} -t` in a namespace whose interfaces exist
+(Kea refuses unknown interfaces, so that cannot run in CI).
 When changing a renderer, update the golden text deliberately and explain why in the
 commit.
 
@@ -195,10 +223,18 @@ commit.
   keepalived started on an empty config, insomnia in signal mode. This keeps the routers
   clear of a keepalived service the development host itself may be running.
 - DHCP routers run via `bdd/tests/scripts/dhcp_node.sh` the same way: the relay agent
-  started on no config (`--pid-file`), zebra-rs, insomnia in signal mode. Standalone
-  servers run via `kea_server.sh`; clients are one `dhcpcd` run each through
+  started on no config (`--pid-file`), zebra-rs, insomnia in signal mode
+  (`--kea-control socket`). `dhcp_node.sh NS kea` also starts the default VRF's
+  kea-dhcp4/kea-dhcp6 on a bootstrap configuration at the paths insomnia renders to,
+  which insomnia's `config-reload` replaces; `kea-vrf VRF` starts a VRF's pair under
+  `ip vrf exec`; `stop-insomnia` / `start-insomnia` re-enter the node's mount namespace
+  through the agent's pid. Kea's paths come from `kea_env.sh` (the host's packages or the
+  staged `KEA_PREFIX` tree). Standalone servers run via `kea_server.sh`; clients are one
+  `dhcpcd` run each through
   `dhcp_client.sh` (private `/run`, its own config, lease variables from a dhcpcd hook),
-  asserted with the `DHCPv4/DHCPv6 client … should obtain an address in …` steps.
+  asserted with the `DHCPv4/DHCPv6 client … should obtain an address|a prefix in …` steps.
+  dhcpcd requests only the options it is told to: name them (`DHCPv4 client with
+  "option ntp_servers" …`) before asserting a lease variable.
   Gate the first `show` on `insomnia log … "show provider registered"`: the `show`
   steps fail on the first connection error instead of retrying while zebra-rs starts.
 
