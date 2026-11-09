@@ -1,8 +1,11 @@
 # DHCP server and relay (VyOS-derived `service` trees) — design
 
-Status: proposal, 2026-10-26. Nothing here is implemented. This document
-settles open decision D9 in `design/vyos-gap.md`, which ranks DHCP second
-among the missing insomnia-shaped features, after NAT.
+Status: proposal, 2026-10-26. The relay is implemented (2026-11-08): the
+agent (§10, insomnia PR #19), the `service dhcp-relay` / `dhcpv6-relay` trees
+with their `vrf` lists, and the relay backend and statistics (zebra-rs branch
+`service-dhcp-relay`, insomnia branch `dhcp-relay-backend`). The server is
+not. This document settles open decision D9 in `design/vyos-gap.md`, which
+ranks DHCP second among the missing insomnia-shaped features, after NAT.
 
 insomnia gains DHCP in two parts:
 
@@ -44,7 +47,7 @@ The Kea facts in §4 come from the packages themselves:
 | DH7 | Failover | Kea's HA hook on its dedicated listener, only with mutual TLS. So it waits for `pki`, and a bad HA block fails closed | 9 |
 | DH8 | Where Kea listens | Never `"*"`. Only on interfaces connected to a configured subnet, unless `listen-interface` or `listen-address` says otherwise | 7.3 |
 | DH9 | DHCPv6-PD routes | insomnia installs `proto dhcp` routes, triggered by Kea and checked against Kea's lease table. Kea gets no `CAP_NET_ADMIN` | 7.5 |
-| DH10 | VRFs | Paths and units are per VRF from the first release. The `vrf` lists come later | 19 |
+| DH10 | VRFs | Paths and units are per VRF from the first release. The relay's `vrf` lists ship with it; the server's come with per-VRF Kea, bound by `BPFProgram=` (`design/process.md` §4) | 19 |
 
 ## 1. Where we are
 
@@ -187,7 +190,7 @@ crates appear in insomnia's binary SBOM like any other.
 
 ## 6. Scope
 
-First release, default VRF only:
+First release: the servers in the default VRF only; the relays in every VRF.
 
 - **`service dhcp-server`:**
   - structure: shared networks, subnets, ranges, `exclude`, static mappings, `subnet-id`;
@@ -198,11 +201,12 @@ First release, default VRF only:
   - structure: shared networks, subnets, address and prefix ranges, prefix delegation, static mappings, `subnet-id`, `lease-time`;
   - options, `global-parameters`, `preference`;
   - `listen-interface` and `interface`, `disable-route-autoinstall`, `log-level`, `disable`.
-- **Relays:** `service dhcp-relay` and `service dhcpv6-relay`.
+- **Relays:** `service dhcp-relay` and `service dhcpv6-relay`, each with its `vrf <name>` list (implemented, §19).
 - **Show:** leases, statistics and static mappings for both families, plus relay statistics `[ext]`.
 
-Deferred (§20): HA, per-VRF instances, DDNS and `hostfile-update`,
-`ping-check`, the `clear` / `restart` verbs, PD route installation in the
+Deferred (§20): HA, per-VRF Kea instances, DDNS and `hostfile-update`,
+`ping-check`, the `clear` / `restart` verbs (operator start, stop and restart
+come generically from `design/process.md` §6), PD route installation in the
 relay, and the DHCP client.
 
 ## 7. Config tree and rendering
@@ -590,8 +594,10 @@ not extra `systemd-units` entries. Under cargo-deb 3.7.0, a second entry with
 - **Config and reload.** The config is `/run/insomnia/dhcp-relay/relay.json`,
   mode 0644, with no secrets. Reload is `SIGHUP`, after the same
   compare-before-reload as Kea.
-- **Counters** are served on `/run/insomnia/dhcp-relay/control`. There is one
-  request, `stats`, answered in JSON.
+- **Counters** are served on `/run/insomnia-dhcp-relay/control`, in the unit's
+  own `RuntimeDirectory=`, which belongs to the dynamic user. There is one
+  request, `stats`, answered in JSON. In signal mode the agent writes its pid
+  to `--pid-file` (`/run/insomnia/dhcp-relay/relay.pid` by insomnia's default).
 - **Why not inside insomnia.** insomnia runs as root and also enforces the
   firewall, IPsec and VRRP. A separate, unprivileged, sandboxed process
   confines a parser bug to the relay. An insomnia restart on upgrade does not
@@ -811,17 +817,9 @@ Lease files hold MAC addresses and hostnames: mode 0640, owner `_kea`.
 `kea-dhcp4 -t` / `kea-dhcp6 -t`, inside a namespace whose interfaces exist.
 Kea rejects missing interfaces, so this cannot run in CI.
 
-**BDD:**
-- `@dhcp_server`. `r1` runs zebra-rs, insomnia and Kea in a private mount namespace (`kea_node.sh`, after `vrrp_node.sh`; insomnia with `--kea-control socket`). `h1` runs `dhcpcd` (present on the development host). Scenarios:
-  - a lease from the range;
-  - a static mapping wins;
-  - `show dhcp server leases` lists it;
-  - statistics show usage;
-  - declarative unload stops serving;
-  - teardown.
-- `@dhcpv6_server`: an address and a delegated prefix. The PD route appears as `D` in `r1`'s IPv6 RIB, and is gone after the lease is released.
-- `@dhcp_relay`: `h1` — `r1` (relay) — `r2` (Kea). `h1` gets a lease from the subnet that matches `r1`'s `giaddr`, and the relay counters move.
-- `@dhcpv6_relay`: the same for v6.
+**BDD:** eight features in four phases, from the relay (runnable now) to
+relay-to-server in two VRFs with overlapping addresses. The suite, its
+topologies, scripts and steps are in `design/dhcp-bdd.md`.
 
 ## 17. Work breakdown
 
@@ -840,7 +838,7 @@ In order within each track; each item is one PR.
 | 9 | insomnia | `dhcp6-pd-routes` | `kea-notify`, the §7.5 checks, sweep and route install | S–M |
 | 10 | insomnia | `dhcp-packet` | the codec crate and fuzz targets | M |
 | 11 | insomnia | `dhcp-relay` | the relay daemon (v4 and v6), the relay backend `src/dhcp_relay.rs`, relay statistics | M–L |
-| 12 | insomnia | `dhcp-bdd` | the four features, `kea_node.sh`, make targets, docs pages | M |
+| 12 | insomnia | `dhcp-bdd-*` | one PR per phase of `design/dhcp-bdd.md` §9: the scripts and steps with the relay features first, then each feature as its backend lands | M |
 | 13 | insomnia | `dhcp-docs` | book chapters, AGENTS.md backend notes | S |
 | 14 | folksy-rs | `mkiso-kea` | disable the stock units, drop the dhcp6 edit | S |
 
@@ -871,22 +869,27 @@ once on an ISO build (no AppArmor):
 - **`run_script` under `_kea`.** It provides `QUERY6_REMOTE_ADDR` and
   `QUERY6_IFACE_NAME` as VyOS's script expects.
 
-## 19. Per-VRF (future)
+## 19. Per-VRF
 
-- **Schema.** `service dhcp-server vrf <name> …`, reusing the same grouping.
+- **Schema.** `service <tree> vrf <name> …`, reusing the same grouping.
   This is zebra-rs's `<feature> vrf <name>` convention (`design/vrrp.md` §13);
   VyOS spells it `vrf name <n> service dhcp-server`.
-- **Instances.** One Kea per family per VRF (`insomnia-kea-dhcp4@<vrf>`), which
-  is already the path and unit layout.
-- **Binding Kea to the VRF.** Kea is not VRF-aware. Run it under the `vrf.o`
-  preload shim from `design/vrrp.md` §13, through the instance's environment
-  file, or under `ip vrf exec` as VyOS does. `ip vrf exec` needs root to attach
-  its cgroup program and then a drop to `_kea`.
+- **Relay: implemented.** `service dhcp-relay vrf <name>` and
+  `service dhcpv6-relay vrf <name>`. The agent binds per-VRF sockets itself, so
+  one process serves every VRF; tested with the VRF, its members and addresses
+  configured through zebra-rs. VyOS has no VRF relay.
+- **Server instances.** One Kea per family per VRF (`insomnia-kea-dhcp4@<vrf>`),
+  which is already the path and unit layout.
+- **Binding Kea to the VRF.** Kea is not VRF-aware. Each instance is bound by
+  systemd's `BPFProgram=sock_create:/sys/fs/bpf/insomnia/vrf/%i`, pinned by
+  insomnia, with `AssertPathExists=` so a missing program refuses the start
+  instead of running Kea in the default VRF (`design/process.md` §4). Kea keeps
+  `_kea` and its two capabilities; `CAP_NET_RAW` also lets it bind a socket
+  to a member interface over the VRF binding.
   - `AF_PACKET` sockets are per interface and need nothing.
-  - UDP sockets (UDP mode, DHCPv6, HA) need the binding.
-  - Shares the VRRP VRF spike.
-- **Relay.** It binds per-VRF sockets itself. VyOS has no VRF relay; ours would
-  be `service dhcp-relay vrf <name>`.
+  - UDP sockets (UDP mode, DHCPv6, HA) get the binding at creation.
+  - In signal mode (BDD) the harness starts Kea under `ip vrf exec <vrf>`,
+    the same kernel hook.
 - **Show.** `show dhcp server vrf <name> …`, as VyOS has.
 
 ## 20. Deferred, with reasons

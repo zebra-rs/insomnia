@@ -480,7 +480,8 @@ insomnia-gated child of the existing zebra-rs `container system`, plus
 - **Lifecycle.** The same render / compare / reload pattern as
   keepalived (§4.5).
 - **VRF.** With per-VRF keepalived (`design/vrrp.md` §13), conntrackd
-  needs the same shim or must stay in the default VRF.
+  needs the same `BPFProgram=` binding (`design/process.md` §4) or must
+  stay in the default VRF.
 - Owner: insomnia. Effort M. P3.
 
 ### 6.6 Policy-based routing: `policy route`, `route6`, `local-route`
@@ -739,7 +740,9 @@ has no history. What remains:
 2. **§8 show grammar:** shipped is
    `show vrrp {statistics|detail} group <NAME>`. Record the word-order
    deviation there and in the `src/vrrp.rs` module doc.
-3. **§13 shim name and failure mode:**
+3. **§13 shim name and failure mode** (moot since 2026-11-08: the shim is
+   replaced by systemd's `BPFProgram=`, whose own fail-open case is closed
+   with `AssertPathExists=`; `design/process.md` §4):
    - `LD_PRELOAD` needs a shared object, so the default
      `--vrf-preload /usr/lib/insomnia/vrf.o` should be `vrf.so` (or be
      documented as built with `-shared`).
