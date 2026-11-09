@@ -723,13 +723,18 @@ on, not the socket that received it.
 Grammar (zebra-rs `exec.yang`, gated on `feat:insomnia`, VyOS's spelling):
 
 ```
-show dhcp   server leases          [pool <name>] [state <state>] [sort <key>] [origin local|remote]
-show dhcp   server statistics      [pool <name>]
-show dhcp   server static-mappings [pool <name>] [sort <key>]
-show dhcpv6 server leases | statistics | static-mappings      (same filters, v6 sort keys)
-show dhcp   relay statistics       [ext]
-show dhcpv6 relay statistics       [ext]
+show dhcp   server [vrf <name>] leases          [pool <name>] [state <state>] [sort <key>] [origin local|remote]
+show dhcp   server [vrf <name>] statistics      [pool <name>]
+show dhcp   server [vrf <name>] static-mappings [pool <name>] [sort <key>]
+show dhcpv6 server [vrf <name>] leases | statistics | static-mappings      (same filters, v6 sort keys)
+show dhcp   relay  [vrf <name>] statistics      [ext]
+show dhcpv6 relay  [vrf <name>] statistics      [ext]
 ```
+
+The VRF comes before the view, as in VyOS's `show dhcp server vrf <name>
+leases` and zebra-rs's `show <proto> vrf <name> …` (`design/process.md`
+§4.9). The built grammar has `vrf` and `pool`; `state`, `sort` and `origin`
+are not built (§22).
 
 Orders reach insomnia under one provider name, `dhcp`, with the prefixes
 `/show/dhcp` and `/show/dhcpv6`. insomnia sends `…/server/…` to that
@@ -932,6 +937,9 @@ once on an ISO build (no AppArmor):
   - In signal mode (BDD) the harness starts Kea under `ip vrf exec <vrf>`,
     the same kernel hook.
 - **Show.** `show dhcp server vrf <name> …`, as VyOS has.
+- **Membership.** Every interface a server or relay instance names must be
+  a member of its VRF; anything else is skipped with a warning
+  (`design/process.md` §4.9). The relay agent checks it again per request.
 
 ## 20. Deferred, with reasons
 
@@ -998,7 +1006,7 @@ What the implementation changed against §3–§19, and why:
   to load when `/usr/sbin/kea-lfc` is missing, which matters only for Kea
   run from an unpacked tree (the BDD harness sets `KEA_LFC_EXECUTABLE`).
 - **Show times are UTC** (`YYYY-MM-DD HH:MM:SS`); VyOS prints local time.
-  `show … leases|statistics|static-mappings` takes `vrf <name>` and
+  `show dhcp[v6] server [vrf <name>] leases|statistics|static-mappings` takes
   `pool <name>`; VyOS's `state`, `sort` and `origin` filters are not built.
   A disabled or not-serving instance answers so instead of listing the
   leases still in its file.

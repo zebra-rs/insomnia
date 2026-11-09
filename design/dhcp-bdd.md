@@ -242,7 +242,7 @@ c9 (c0) ── lan9    ─┘
 
 Scenarios:
 1. **Each tenant's client gets a lease from its own instance:** `c1` in `10.1.0.100–149`, `c2` in `10.1.0.150–199`, `c9` in `10.9.0.0/24`. IPv6 the same.
-2. **Show per VRF:** `show dhcp server leases vrf red` lists `c1` and not `c2`; the statistics are per VRF.
+2. **Show per VRF:** `show dhcp server vrf red leases` lists `c1` and not `c2`; the statistics are per VRF.
 3. **`show process`** lists `kea-dhcp4@default`, `kea-dhcp4@red`, `kea-dhcp4@blue` and `dhcp-relay`, all running (`design/process.md` §6.3, signal mode).
 4. **PD in a VRF:** a client on `lanred` with IA_PD makes `r1` install the route in `red`'s table (`ip -6 route show vrf red … proto dhcp`), not in the main table.
 5. **Removing one tenant:** `delete service dhcp-server vrf blue`; `c2` gets nothing, and `red` keeps serving.

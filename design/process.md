@@ -242,6 +242,25 @@ repeats §4.3.
 - **`design/dhcp.md` §19:** Kea's binding options.
 - **openconfigd's `vrf_socket.so`.**
 
+### 4.9 One set of rules for every per-VRF instance
+
+Settled 2026-11-09, after the DHCP server and relay shipped and before
+`vrrp vrf <name>` is built, so that every backend behaves the same:
+
+| Rule | What it means | Where |
+|:--|:--|:--|
+| Config spelling | `<feature> vrf <name> …` with the same grouping as the top level, which is the global table: `service dhcp-server vrf red …`, `service dhcp-relay vrf red …`, `vrrp vrf red …`. The key is a plain string (`ext:dynamic "rib:vrf"`), so a VRF may be configured after the instance that names it | zebra-rs `config.yang` |
+| `default` is reserved | `default` names the global table everywhere (instance names, pins, the top level of every tree), so the top-level `vrf` list and the insomnia trees' `vrf` lists refuse it at commit; a startup config only warns. insomnia ignores a `vrf default` entry an older zebra-rs delivers, with a warning | zebra-rs `config::check::reserved_vrf`; insomnia `links::reserved_vrf` |
+| Membership | Every interface an instance names must be a member of its VRF (enslaved to the VRF device; to no VRF for the global table). Anything else, or an interface that does not exist, is skipped with a warning: "listen-interface lan9 is in VRF default, not red; skipped". Re-rendered on every link change | `links::Snapshot::member`, in every renderer |
+| Missing VRF | One warning, from every backend: "service dhcp-server vrf red: VRF red does not exist; not started". The instance is not started (Kea idles, the relay drops its bindings, a unit is not started) | `links::missing_vrf` |
+| Show grammar | `show <feature> [vrf <name>] <view> …`: VyOS's and zebra-rs's order (`show dhcp server vrf red leases`, `show dhcp relay vrf red statistics`, `show vrrp vrf red detail`). Bare `show <feature> <view>` is the global table, except the relay's statistics, which cover every VRF of its one process | zebra-rs `exec.yang` |
+| Process names | `<daemon>@<vrf>` for one instance per VRF; a daemon that binds its own sockets per VRF is one process with a plain name (`dhcp-relay`) | `process::Registry` |
+
+The relay agent checks membership again per request for its VRF
+bindings (the interface's master must be the VRF device): a client on
+one VRF's segment is never relayed to another VRF's servers, even in the
+moment between an interface moving and the next render.
+
 ## 5. The process registry (PM4)
 
 `insomnia::process` grows from the reload helper into a registry. Each backend

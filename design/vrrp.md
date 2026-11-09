@@ -597,10 +597,13 @@ container vrrp {
 
 `set vrrp vrf red group WAN interface eth1 …` therefore mirrors the default
 spelling exactly. There is no `vrf` leaf on the group: the enclosing list is
-the VRF. The group's `interface` must be enslaved to that VRF
-(`interface eth1 vrf red`, which the zebra-rs RIB applies before addresses);
-the renderer warns when a per-address `interface` names a device that is not,
-and commit-time cross-checking stays with the shared validation follow-up.
+the VRF. It follows the rules every per-VRF instance follows
+(`design/process.md` §4.9): the group's `interface` and every per-address
+`interface` must be members of that VRF (`interface eth1 vrf red`, which the
+zebra-rs RIB applies before addresses), or the group is skipped with the same
+"is in VRF default, not red; skipped" warning the DHCP backends give; a VRF
+that does not exist gets "VRF red does not exist; not started"; `vrf default`
+is refused at commit.
 
 ### Rendering and applying
 

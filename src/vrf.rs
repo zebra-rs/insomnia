@@ -55,6 +55,9 @@ pub fn ifindex(links: &Snapshot, vrf: &str) -> Option<u32> {
     if vrf == DEFAULT_VRF {
         return Some(0);
     }
+    if !links.has_vrf(vrf) {
+        return None;
+    }
     links
         .links
         .values()

@@ -434,7 +434,12 @@ fn render_family(
                 return out;
             };
             for (vrf, server) in dhcp4::instances(tree) {
-                let render = dhcp4::render(server, &context(kea, family, &vrf, snapshot));
+                let mut render = dhcp4::render(server, &context(kea, family, &vrf, snapshot));
+                if vrf == DEFAULT_VRF && dhcp4::names_default_vrf(tree) {
+                    render
+                        .warnings
+                        .push(crate::links::reserved_vrf("service dhcp-server"));
+                }
                 out.push((vrf, render));
             }
         }
@@ -443,7 +448,12 @@ fn render_family(
                 return out;
             };
             for (vrf, server) in dhcp6::instances(tree) {
-                let render = dhcp6::render(server, &context(kea, family, &vrf, snapshot));
+                let mut render = dhcp6::render(server, &context(kea, family, &vrf, snapshot));
+                if vrf == DEFAULT_VRF && dhcp6::names_default_vrf(tree) {
+                    render
+                        .warnings
+                        .push(crate::links::reserved_vrf("service dhcpv6-server"));
+                }
                 out.push((vrf, render));
             }
         }
@@ -617,8 +627,9 @@ struct ShowOrder {
     pool: Option<String>,
 }
 
-/// `/show/dhcp[v6]/server/<view>[/vrf][/pool]` with the key values in
-/// `args`, in order.
+/// `/show/dhcp[v6]/server[/vrf]/<view>[/pool]` with the key values in
+/// `args`, in order (`show dhcp server vrf red leases pool LAN`). A bare
+/// `vrf <name>` has an empty view.
 fn parse_order(path: &str, args: &[String]) -> Option<ShowOrder> {
     let mut segs = path.trim_start_matches('/').split('/');
     if segs.next()? != "show" {
@@ -632,11 +643,10 @@ fn parse_order(path: &str, args: &[String]) -> Option<ShowOrder> {
     if segs.next()? != "server" {
         return None;
     }
-    let view = segs.next()?.to_string();
     let mut args = args.iter();
     let mut order = ShowOrder {
         family,
-        view,
+        view: String::new(),
         vrf: DEFAULT_VRF.to_string(),
         pool: None,
     };
@@ -644,6 +654,7 @@ fn parse_order(path: &str, args: &[String]) -> Option<ShowOrder> {
         match seg {
             "vrf" => order.vrf = args.next()?.clone(),
             "pool" => order.pool = Some(args.next()?.clone()),
+            view @ ("leases" | "statistics" | "static-mappings") => order.view = view.to_string(),
             _ => return None,
         }
     }
@@ -690,6 +701,12 @@ fn disabled(state: &State, family: Family, vrf: &str) -> bool {
 
 async fn show(kea: &Kea, state: &State, order: &ShowOrder, json: bool) -> String {
     let v = if order.family == Family::V6 { "v6" } else { "" };
+    if order.view.is_empty() {
+        return format!(
+            "% Specify a view: show dhcp{v} server vrf {} leases|statistics|static-mappings\n",
+            order.vrf
+        );
+    }
     let in_vrf = if order.vrf == DEFAULT_VRF {
         String::new()
     } else {
@@ -1188,7 +1205,7 @@ pub mod tests {
         );
         assert_eq!(
             parse_order(
-                "/show/dhcpv6/server/statistics/vrf/pool",
+                "/show/dhcpv6/server/vrf/statistics/pool",
                 &args(&["red", "LAN"])
             ),
             Some(ShowOrder {
@@ -1196,6 +1213,15 @@ pub mod tests {
                 view: "statistics".into(),
                 vrf: "red".into(),
                 pool: Some("LAN".into())
+            })
+        );
+        assert_eq!(
+            parse_order("/show/dhcp/server/vrf", &args(&["red"])),
+            Some(ShowOrder {
+                family: Family::V4,
+                view: String::new(),
+                vrf: "red".into(),
+                pool: None
             })
         );
         assert_eq!(parse_order("/show/dhcp/relay/statistics", &[]), None);

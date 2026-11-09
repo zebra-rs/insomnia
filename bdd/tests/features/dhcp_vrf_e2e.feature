@@ -69,11 +69,11 @@ Feature: Relay per VRF to server per VRF, overlapping tenants end to end (insomn
     Given the test topology exists
     Then show command "show dhcp relay statistics" in namespace "r1" should contain "red   lanred     2         2"
     And show command "show dhcp relay statistics" in namespace "r1" should contain "blue  lanblue    2         2"
-    And show command "show dhcp server leases vrf red" in namespace "r2" should contain "10.1.0.100"
-    And show command "show dhcp server leases vrf red" in namespace "r2" should not contain "10.1.0.150"
-    And show command "show dhcp server leases vrf blue" in namespace "r2" should contain "10.1.0.150"
-    And show command "show dhcpv6 server leases vrf blue" in namespace "r2" should contain "2001:db8:1::150"
-    And show command "show dhcpv6 server leases vrf blue" in namespace "r2" should not contain "2001:db8:1::100"
+    And show command "show dhcp server vrf red leases" in namespace "r2" should contain "10.1.0.100"
+    And show command "show dhcp server vrf red leases" in namespace "r2" should not contain "10.1.0.150"
+    And show command "show dhcp server vrf blue leases" in namespace "r2" should contain "10.1.0.150"
+    And show command "show dhcpv6 server vrf blue leases" in namespace "r2" should contain "2001:db8:1::150"
+    And show command "show dhcpv6 server vrf blue leases" in namespace "r2" should not contain "2001:db8:1::100"
 
   Scenario: Teardown topology
     Given the test topology exists

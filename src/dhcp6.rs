@@ -211,9 +211,21 @@ pub fn instances(tree: &Server6Tree) -> Vec<(String, &Server6)> {
         .chain(
             tree.vrf
                 .iter()
-                .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.server))),
+                .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.server)))
+                // The global table is the top level (`links::reserved_vrf`).
+                .filter(|(name, _)| name != crate::links::DEFAULT_VRF),
         )
         .collect()
+}
+
+/// Whether the tree has a `vrf default` entry, which [`instances`]
+/// leaves out.
+pub fn names_default_vrf(tree: &Server6Tree) -> bool {
+    tree.vrf.iter().any(|v| {
+        v.name
+            .as_ref()
+            .is_some_and(|n| n.to_string() == crate::links::DEFAULT_VRF)
+    })
 }
 
 // ---------------------------------------------------------------
@@ -342,6 +354,13 @@ fn u8_of(value: Option<&Flex>) -> Option<u8> {
 /// One instance → its Kea configuration.
 pub fn render(server: &Server6, ctx: &Context) -> Render {
     let scope = scope(ctx.vrf);
+    // A VRF that does not exist has no interfaces to serve: one warning,
+    // the same as every backend gives, and the idle render.
+    if !server.disable && !server.is_empty() && !ctx.links.has_vrf(ctx.vrf) {
+        let mut idle = render(&Server6::default(), ctx);
+        idle.warnings = vec![crate::links::missing_vrf(&scope, ctx.vrf)];
+        return idle;
+    }
     let mut warnings = Vec::new();
     let mut instance = Instance::default();
     let members: BTreeMap<String, u32> = ctx
