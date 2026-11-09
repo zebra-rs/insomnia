@@ -25,6 +25,9 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # kill(2) for keepalived reload / JSON-dump signals and pid liveness.
 libc = "0.2"
+# The relay agent's relay.json types, which the DHCP relay backend
+# renders.
+dhcp-relay = { path = "dhcp-relay" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -81,25 +84,36 @@ revision = ""
 # packaging/changelog-gen.sh (the packaging Makefile runs it before cargo deb).
 changelog = "packaging/out/changelog"
 extended-description = """
-insomnia is the out-of-process firewall / IPsec / VRRP enforcement daemon
-for zebra-rs. zebra-rs owns the configuration (YANG schema, candidate/running
-stores, commit); insomnia subscribes to the `firewall`, `vpn ipsec` and
-`vrrp` running-config subtrees over gRPC and renders them into nftables,
-strongSwan (swanctl) and keepalived state, and answers `show firewall` /
-`show vpn ipsec` / `show vrrp` on the zebra-rs CLI as the show provider for
-the three trees."""
+insomnia is the out-of-process firewall / IPsec / VRRP / DHCP relay
+enforcement daemon for zebra-rs. zebra-rs owns the configuration (YANG
+schema, candidate/running stores, commit); insomnia subscribes to the
+`firewall`, `vpn ipsec`, `vrrp` and `service dhcp-relay` /
+`service dhcpv6-relay` running-config subtrees over gRPC and renders them
+into nftables, strongSwan (swanctl), keepalived and insomnia-dhcp-relay
+state, and answers `show firewall` / `show vpn ipsec` / `show vrrp` /
+`show dhcp relay` on the zebra-rs CLI as the show provider for those trees.
+insomnia-dhcp-relay, its DHCPv4/DHCPv6 relay agent, ships in this package."""
 # Custom maintainer scripts; each carries a #DEBHELPER# token where cargo-deb
 # injects the generated systemd fragments.
 maintainer-scripts = "packaging/maintainer"
-# insomnia-keepalived@.service is the per-VRF keepalived template unit
-# insomnia starts, reloads and stops itself. It has no [Install] section and
-# needs no maintainer-script fragments, so it ships as a plain asset. As a
-# second systemd-units entry, its `enable = false, start = false` replaced
-# the fragments generated for insomnia.service (cargo-deb 3.7.0), and a
-# fresh install left insomnia disabled and stopped.
+# insomnia-keepalived@.service is the per-VRF keepalived template unit and
+# insomnia-dhcp-relay.service the relay agent's unit; insomnia starts,
+# reloads and stops both itself. They have no [Install] section and need no
+# maintainer-script fragments, so they ship as plain assets. As a second
+# systemd-units entry, `enable = false, start = false` replaced the
+# fragments generated for insomnia.service (cargo-deb 3.7.0), and a fresh
+# install left insomnia disabled and stopped.
+#
+# Like dh_installsystemd, cargo-deb puts every non-template unit the package
+# installs into the generated start/restart/stop fragments below, so the
+# relay agent is started on install (idle: no relay.json yet, so no sockets)
+# and restarted on upgrade, which moves it to the new binary. insomnia stops
+# it whenever there is nothing to relay.
 assets = [
   ["target/release/insomnia", "usr/bin/", "755"],
+  ["target/release/insomnia-dhcp-relay", "usr/bin/", "755"],
   ["packaging/systemd/insomnia-keepalived@.service", "usr/lib/systemd/system/", "644"],
+  ["packaging/systemd/insomnia-dhcp-relay.service", "usr/lib/systemd/system/", "644"],
 ]
 
 # systemd unit. cargo-deb adds packaging/systemd/insomnia.service as an asset

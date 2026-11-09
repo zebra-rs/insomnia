@@ -322,10 +322,10 @@ no path changes. The first release only ever creates `default`.
 
 | Flag | Default | Meaning |
 |:-----|:--------|:--------|
-| `--keepalived-dir` | `/run/insomnia/vrrp` | `<dir>/<vrf>/keepalived.conf` (rendered; temp file + rename, mode 0600), `keepalived.pid` (parent pid; signal mode and `show vrrp`), `keepalived.json` (keepalived's dump, placed here through `TMPDIR`), `env` (per-instance environment, empty for `default`, §13) |
+| `--keepalived-dir` | `/run/insomnia/vrrp` | `<dir>/<vrf>/keepalived.conf` (rendered; temp file + rename, mode 0600), `keepalived.pid` (parent pid; signal mode and `show vrrp`), `keepalived.json` (keepalived's dump, placed here through `TMPDIR`), `env` (per-instance environment, empty; to be removed with the shim, §13) |
 | `--keepalived-control` | `systemd` | `systemd` or `signal` |
 | `--keepalived-unit` | `insomnia-keepalived@.service` | template unit; the instance name is the VRF (`default` for the global table) |
-| `--vrf-preload` | `/usr/lib/insomnia/vrf.o` | `LD_PRELOAD` shim written into non-default instances' `env` (§13) |
+| `--vrf-preload` | `/usr/lib/insomnia/vrf.o` | `LD_PRELOAD` shim written into non-default instances' `env`. Superseded: to be removed (§13, `design/process.md` §4.8) |
 
 Control modes:
 
@@ -544,35 +544,33 @@ against the host keepalived:
 
 Not in the first release, but the first release is laid out so that adding it
 changes no paths and no plumbing. Decision (2026-09-07): **one keepalived
-process per VRF, launched under an `LD_PRELOAD` shim** that binds every socket
-the process creates to the VRF device before `bind()` / `connect()`. keepalived
-is not relied on to be VRF-aware. (keepalived 2.2.8 does carry partial VRF
-handling — it enslaves a VMAC it creates to the parent's VRF master and binds
-source-bound unicast sockets to the VRF, `vrrp_vmac.c` / `vrrp.c` — but that is
-incidental; the shim makes the whole process VRF-local regardless.)
+process per VRF.** keepalived is not relied on to be VRF-aware. (keepalived
+2.2.8 does carry partial VRF handling — it enslaves a VMAC it creates to the
+parent's VRF master and binds source-bound unicast sockets to the VRF,
+`vrrp_vmac.c` / `vrrp.c` — but that is incidental; the binding below makes the
+whole process VRF-local regardless.)
+
+**Binding decision revised (2026-11-08):** the instance is bound to its VRF by
+systemd's `BPFProgram=sock_create:`, not by an `LD_PRELOAD` shim. The mechanism,
+its verification and the pin lifecycle are in `design/process.md` §4. The
+shim (`vrf.o`), the per-instance `env` file and `--vrf-preload` go.
 
 ### Mechanism
 
-- **The shim, `vrf.o`.** A small preload library, still to be written (nothing
-  in the workspace provides it today). It wraps `socket()` / `bind()` /
-  `connect()` and applies `SO_BINDTODEVICE` with the VRF device named by an
-  environment variable (`VRF=<name>`). One hard requirement: it must **not
-  override a device the process already bound** with `SO_BINDTODEVICE`.
-  keepalived binds its advertisement sockets to the member interface itself;
-  the shim only has to catch the sockets keepalived binds by address (unicast
-  source, health checks). `ip vrf exec` achieves the same through a cgroup BPF
-  hook; the preload was chosen because it needs no cgroup/BPF setup and works
-  identically inside the BDD namespaces.
+- **The binding.** insomnia pins a cgroup-BPF program per VRF at
+  `/sys/fs/bpf/insomnia/vrf/<vrf>`. The template unit attaches it with
+  `BPFProgram=sock_create:/sys/fs/bpf/insomnia/vrf/%i` and refuses to start
+  without it (`AssertPathExists=` in `[Unit]`). Every IPv4 and IPv6 socket
+  keepalived creates is bound to the VRF device at creation. keepalived binds
+  its advertisement sockets to the member interface itself, which overrides
+  the VRF on those sockets; it runs as root, so it may (`design/process.md`
+  §4.3 row 10).
 - **Inheritance.** Health-check and transition scripts are children of
-  keepalived and inherit `LD_PRELOAD` / `VRF`, so a `ping` health check runs
-  in the VRF with no `ip vrf exec` wrapping in the rendered config. Caveat to
-  verify: `ping` carries `cap_net_raw=ep`, and the loader drops `LD_PRELOAD`
-  under secure-execution, which applies when an exec raises privileges.
-  keepalived runs scripts as root (`script_user root`), so no raise occurs and
-  the preload should survive; if it does not, the renderer wraps `ping` in
-  `ip vrf exec <vrf>`.
+  keepalived and inherit the cgroup, so a `ping` health check runs in the VRF
+  with no `ip vrf exec` wrapping in the rendered config. Unlike `LD_PRELOAD`,
+  the cgroup binding survives `ping`'s file capabilities.
 - **One process per VRF.** VRF is not a network namespace, so nothing forces
-  a process split; it is chosen because the shim's binding is process-wide,
+  a process split; it is chosen because the binding is per unit (per cgroup),
   and because it keeps each keepalived's sockets, pid file, JSON dump and
   reload blast radius per VRF. keepalived's fixed file names are kept apart
   per instance through `TMPDIR` (honoured by `set_tmp_dir`, `lib/utils.c`) and
@@ -607,18 +605,18 @@ and commit-time cross-checking stays with the shared validation follow-up.
 - Each `vrrp vrf <name>` subtree renders to its own
   `/run/insomnia/vrrp/<name>/keepalived.conf` with the same renderer as the
   default tree — the render function takes a subtree, not the whole config.
-- insomnia writes `/run/insomnia/vrrp/<name>/env` containing
-  `LD_PRELOAD=<--vrf-preload>` and `VRF=<name>`; the `default` instance's
-  `env` is empty. The template unit reads it (§7); the BDD node script exports
-  the same variables before starting each keepalived.
+- insomnia pins the VRF's program before it starts or reloads the instance,
+  and re-pins and restarts it when the VRF is re-created
+  (`design/process.md` §4.5). The BDD node script starts each keepalived
+  under `ip vrf exec <name>`, the same kernel hook.
 - Reload only instances whose rendered file changed, stop an instance whose
   subtree disappeared, start one on its first non-empty render. The first
   release already behaves this way for `default`.
 - VRID uniqueness stays per (interface, family): the same VRID may appear in
   two VRFs on different interfaces, as the virtual MAC is per L2 segment.
 - `rfc3768-compatibility`: keepalived creates the macvlan and, being 2.2.8,
-  enslaves it to the parent's VRF master itself; the shim is not involved in
-  netlink. Verify in the spike.
+  enslaves it to the parent's VRF master itself; the cgroup binding does not
+  touch netlink. Verify in the spike.
 
 ### Show
 
@@ -636,26 +634,26 @@ The two-router feature with `set vrf red` and `set interface i1 vrf red` on
 both routers and the groups under `vrrp vrf red`: assert the virtual address on
 the enslaved interface and its connected route in `ip route show vrf red`,
 ping from the client, failover, declarative unload, teardown. The node script
-starts one keepalived per instance directory with that directory's `env`
-exported.
+starts one keepalived per instance directory, under `ip vrf exec <name>` for a
+VRF instance.
 
 ### Spike, before the VRF step
 
-- Shim ordering: keepalived's own `SO_BINDTODEVICE(<member interface>)` on the
-  advertisement socket survives, and adverts are sent and received on the
-  enslaved interface.
+- keepalived's own `SO_BINDTODEVICE(<member interface>)` on the advertisement
+  socket takes effect over the cgroup binding, and adverts are sent and
+  received on the enslaved interface.
 - `hello-source-address` and unicast peers inside the VRF bind and exchange
-  adverts under the shim.
-- A `ping` health check under inherited `LD_PRELOAD` reaches a VRF-internal
-  target (the `cap_net_raw` question above).
+  adverts under the cgroup binding.
+- A `ping` health check reaches a VRF-internal target.
 - The VMAC macvlan lands in the VRF and the virtual address appears in the
   VRF's table.
 
 ### Prepared in the first release
 
-Per-instance directory layout with `TMPDIR` (§7), the template unit with its
-`env` file, compare-before-reload, a renderer that takes a subtree, the show
-grammar as a grouping (§9), and the reserved `--vrf-preload` flag.
+Per-instance directory layout with `TMPDIR` (§7), the template unit,
+compare-before-reload, a renderer that takes a subtree, and the show grammar as
+a grouping (§9). The `env` file and the `--vrf-preload` flag were prepared for
+the shim and go with it.
 
 ## 14. Deferred, with reasons
 
@@ -678,8 +676,8 @@ grammar as a grouping (§9), and the reserved `--vrf-preload` flag.
   the IPv4 pair is green.
 - **FRR's `accept-mode`** — see §2: FRR itself does not implement it, and
   keepalived's `no_accept` needs nftables rules of its own.
-- **VRRP in a VRF** — designed in §13; needs the `vrf.o` shim and the
-  `vrrp vrf <name>` list.
+- **VRRP in a VRF** — designed in §13; needs the VRF binding of
+  `design/process.md` §4 and the `vrrp vrf <name>` list.
 - **FRR-style per-interface spelling** (`interface eth0` / `vrrp 5 …`) as an
   alias onto the same model — only if operators coming from FRR ask for it;
   §2 explains why it is not the primary tree.

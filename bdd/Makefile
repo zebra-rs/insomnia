@@ -41,7 +41,7 @@ CUCUMBER = $(MAKE) --no-print-directory stage && cargo test --test cucumber
 # against one rather than silently falling back to /usr.
 .PHONY: stage
 stage:
-	cargo build $(CARGO_PROFILE_FLAG) -p insomnia
+	cargo build $(CARGO_PROFILE_FLAG) -p insomnia -p dhcp-relay
 	@for b in $(ZEBRA_BINS); do \
 	    [ -x "$(ZEBRA_PREFIX)/bin/$$b" ] || { \
 	        echo "error: $(ZEBRA_PREFIX)/bin/$$b not found — install zebra-rs or pass ZEBRA_PREFIX=<tree laid out like /usr>"; \
@@ -51,7 +51,7 @@ stage:
 	    echo "error: $(ZEBRA_PREFIX)/share/zebra-rs/yang not found"; exit 1; }
 	@rm -rf $(STAGE).tmp
 	@mkdir -p $(STAGE).tmp/bin $(STAGE).tmp/share/zebra-rs/yang
-	@install -m 0755 $(TARGET_DIR)/$(PROFILE)/insomnia $(STAGE).tmp/bin/
+	@install -m 0755 $(TARGET_DIR)/$(PROFILE)/insomnia $(TARGET_DIR)/$(PROFILE)/insomnia-dhcp-relay $(STAGE).tmp/bin/
 	@install -m 0755 $(addprefix $(ZEBRA_PREFIX)/bin/,$(ZEBRA_BINS)) $(STAGE).tmp/bin/
 	@install -m 0644 $(ZEBRA_PREFIX)/share/zebra-rs/yang/*.yang $(STAGE).tmp/share/zebra-rs/yang/
 	@rm -rf $(STAGE)

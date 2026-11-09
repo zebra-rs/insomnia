@@ -1,6 +1,6 @@
 //! Show-provider client (`zebra.show.v1`).
 //!
-//! Registers the `firewall`, `ipsec` and `vrrp` show trees with
+//! Registers the `firewall`, `ipsec`, `vrrp` and `dhcp` show trees with
 //! zebra-rs and pumps its orders to the backend tasks: `show firewall …`
 //! typed at the zebra-rs CLI is answered from this process.
 //! Re-registers with backoff whenever the stream drops (zebra-rs
@@ -14,6 +14,33 @@ use crate::endpoint::{RECONNECT_DELAY, connect_retry};
 use crate::pb::show::show_provider_service_client::ShowProviderServiceClient;
 use crate::pb::show::{ProviderMessage, Register, ShowChunk, ShowOrder, provider_message};
 
+/// The show channel of each backend task.
+pub struct Backends {
+    pub firewall: mpsc::Sender<ShowRequest>,
+    pub ipsec: mpsc::Sender<ShowRequest>,
+    pub vrrp: mpsc::Sender<ShowRequest>,
+    /// `show dhcp …` and `show dhcpv6 …` (the relay backend).
+    pub dhcp: mpsc::Sender<ShowRequest>,
+}
+
+impl Backends {
+    /// The backend serving `path`, by its prefix.
+    fn route(&self, path: &str) -> Option<&mpsc::Sender<ShowRequest>> {
+        if path.starts_with("/show/firewall") {
+            Some(&self.firewall)
+        } else if path.starts_with("/show/vpn/ipsec") {
+            Some(&self.ipsec)
+        } else if path.starts_with("/show/vrrp") {
+            Some(&self.vrrp)
+        } else if path.starts_with("/show/dhcp") {
+            // Also `/show/dhcpv6`.
+            Some(&self.dhcp)
+        } else {
+            None
+        }
+    }
+}
+
 fn register_message() -> ProviderMessage {
     ProviderMessage {
         msg: Some(provider_message::Msg::Register(Register {
@@ -21,6 +48,7 @@ fn register_message() -> ProviderMessage {
                 "firewall".to_string(),
                 "ipsec".to_string(),
                 "vrrp".to_string(),
+                "dhcp".to_string(),
             ],
         })),
     }
@@ -36,12 +64,7 @@ fn chunk_message(id: u64, text: String) -> ProviderMessage {
     }
 }
 
-pub async fn run(
-    host: String,
-    firewall_tx: mpsc::Sender<ShowRequest>,
-    ipsec_tx: mpsc::Sender<ShowRequest>,
-    vrrp_tx: mpsc::Sender<ShowRequest>,
-) {
+pub async fn run(host: String, backends: Backends) {
     loop {
         let channel = connect_retry(&host).await;
         let mut client = ShowProviderServiceClient::new(channel);
@@ -58,13 +81,11 @@ pub async fn run(
                 continue;
             }
         };
-        tracing::info!("show provider registered (firewall, ipsec, vrrp)");
+        tracing::info!("show provider registered (firewall, ipsec, vrrp, dhcp)");
 
         loop {
             match orders.message().await {
-                Ok(Some(order)) => {
-                    dispatch(order, &firewall_tx, &ipsec_tx, &vrrp_tx, &out_tx).await
-                }
+                Ok(Some(order)) => dispatch(order, &backends, &out_tx).await,
                 Ok(None) => break,
                 Err(err) => {
                     tracing::warn!("show provider stream error: {err}");
@@ -81,23 +102,8 @@ pub async fn run(
 /// relay task keeps the order loop free while the backend renders,
 /// and guarantees exactly one eof chunk per order even when the
 /// backend is gone (dropped oneshot).
-async fn dispatch(
-    order: ShowOrder,
-    firewall_tx: &mpsc::Sender<ShowRequest>,
-    ipsec_tx: &mpsc::Sender<ShowRequest>,
-    vrrp_tx: &mpsc::Sender<ShowRequest>,
-    out_tx: &mpsc::Sender<ProviderMessage>,
-) {
-    let backend = if order.path.starts_with("/show/firewall") {
-        Some(firewall_tx)
-    } else if order.path.starts_with("/show/vpn/ipsec") {
-        Some(ipsec_tx)
-    } else if order.path.starts_with("/show/vrrp") {
-        Some(vrrp_tx)
-    } else {
-        None
-    };
-    let Some(backend) = backend else {
+async fn dispatch(order: ShowOrder, backends: &Backends, out_tx: &mpsc::Sender<ProviderMessage>) {
+    let Some(backend) = backends.route(&order.path) else {
         let _ = out_tx
             .send(chunk_message(
                 order.id,
