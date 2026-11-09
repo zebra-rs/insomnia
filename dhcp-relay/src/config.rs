@@ -1,7 +1,9 @@
 //! `relay.json`: what the relay serves.
 //!
 //! insomnia renders this file from the running config and sends
-//! `SIGHUP`; the daemon never talks to zebra-rs. The format is
+//! `SIGHUP`; the daemon never talks to zebra-rs. insomnia builds the
+//! file from these same types (this module is the crate's library), so
+//! the two cannot drift apart. The format is
 //! deliberately independent of the config schema: one *binding* per
 //! listen (downstream, client-facing) interface, each carrying its own
 //! upstream targets and relay options.
@@ -68,14 +70,14 @@ use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_VRF: &str = "default";
 
 /// Linux interface names are at most 15 bytes (IFNAMSIZ - 1).
 const IFNAME_MAX: usize = 15;
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     #[serde(default)]
@@ -84,7 +86,7 @@ pub struct Config {
     pub dhcp6: Vec<Binding6>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct Binding4 {
     #[serde(default = "default_vrf")]
@@ -105,7 +107,7 @@ pub struct Binding4 {
 
 /// What to do with a request that already carries option 82 (VyOS
 /// `relay-options relay-agents-packets`, `dhcrelay -m`).
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentPolicy {
     #[default]
@@ -115,13 +117,13 @@ pub enum AgentPolicy {
     Discard,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct Binding6 {
     #[serde(default = "default_vrf")]
     pub vrf: String,
     pub interface: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_address: Option<Ipv6Addr>,
     pub servers: Vec<Server6>,
     #[serde(default = "default_hops")]
@@ -130,11 +132,11 @@ pub struct Binding6 {
     pub interface_id: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct Server6 {
     pub address: Ipv6Addr,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<String>,
 }
 

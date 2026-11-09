@@ -4,13 +4,16 @@ This file provides guidance to coding agents including Claude Code (claude.ai/co
 
 ## What insomnia is
 
-insomnia is the out-of-process firewall / IPsec / VRRP enforcement daemon for
-zebra-rs. zebra-rs owns the configuration (YANG schema, candidate/running stores,
-commit); insomnia enforces it. It subscribes to the `firewall`, `vpn ipsec` and `vrrp`
-running-config subtrees over gRPC, renders them into nftables, strongSwan (swanctl) and
-keepalived state, and registers as the show provider so `show firewall …`,
-`show vpn ipsec …` and `show vrrp …` typed at the zebra-rs CLI are answered by this
-process. The backends were moved out of the zebra-rs
+insomnia is the out-of-process firewall / IPsec / VRRP / DHCP relay enforcement
+daemon for zebra-rs. zebra-rs owns the configuration (YANG schema, candidate/running
+stores, commit); insomnia enforces it. It subscribes to the `firewall`, `vpn ipsec`,
+`vrrp`, `service dhcp-relay` and `service dhcpv6-relay` running-config subtrees over
+gRPC, renders them into nftables, strongSwan (swanctl), keepalived and
+insomnia-dhcp-relay state, and registers as the show provider so `show firewall …`,
+`show vpn ipsec …`, `show vrrp …` and `show dhcp[v6] relay statistics` typed at the
+zebra-rs CLI are answered by this process. The DHCP relay agent itself,
+`insomnia-dhcp-relay`, is a second binary in this workspace (`dhcp-relay/`, with the
+packet codec in `dhcp-packet/`). The backends were moved out of the zebra-rs
 tree, not rewritten — `src/api.rs` deliberately mirrors the in-process channel types they
 used to consume.
 
@@ -34,7 +37,12 @@ default `info`). `--host` accepts `unix:NAME` (Linux abstract socket, the defaul
 default to the stock strongSwan paths. `--keepalived-dir` (default `/run/insomnia/vrrp`)
 holds one keepalived instance directory per VRF; `--keepalived-control systemd|signal`
 picks between the `insomnia-keepalived@<vrf>.service` template unit and SIGHUP to the
-instance's pid file (what the BDD harness uses).
+instance's pid file (what the BDD harness uses). The DHCP relay backend writes
+`--dhcp-relay-dir/relay.json` (default `/run/insomnia/dhcp-relay`);
+`--dhcp-relay-control systemd|signal` picks between `insomnia-dhcp-relay.service` and
+SIGHUP to `relay.pid` in that directory, and `--dhcp-relay-socket` (default
+`/run/insomnia-dhcp-relay/control`) is the agent's control socket that
+`show dhcp relay statistics` queries.
 
 ### BDD integration tests (`bdd/`)
 
@@ -82,22 +90,24 @@ The `book/` directory is an mdBook (`mdbook build` inside `book/`; output is git
 
 ### Process layout (`src/main.rs`)
 
-Four long-lived tokio tasks share one `--host`:
+Five long-lived tokio tasks share one `--host`:
 
-- `firewall::run`, `ipsec::run` and `vrrp::run` — one backend task per config subtree.
-- `provider::run` — registers the `firewall`, `ipsec` and `vrrp` show trees with zebra-rs
-  and routes each `ShowOrder` by path prefix (`/show/firewall` → firewall,
-  `/show/vpn/ipsec` → ipsec, `/show/vrrp` → vrrp) over an mpsc channel carrying
-  `api::ShowRequest`. Each request holds a
+- `firewall::run`, `ipsec::run`, `vrrp::run` and `dhcp_relay::run` — one backend task
+  per config subtree (the DHCP relay task subscribes to both relay subtrees and renders
+  nothing until both snapshots have arrived).
+- `provider::run` — registers the `firewall`, `ipsec`, `vrrp` and `dhcp` show trees with
+  zebra-rs and routes each `ShowOrder` by path prefix (`/show/firewall` → firewall,
+  `/show/vpn/ipsec` → ipsec, `/show/vrrp` → vrrp, `/show/dhcp` and `/show/dhcpv6` →
+  dhcp_relay) over an mpsc channel carrying `api::ShowRequest`. Each request holds a
   oneshot; every order must be answered exactly once, and a dropped oneshot is turned into
   an error chunk so the CLI never hangs.
 
 Every connection retries forever with `endpoint::RECONNECT_DELAY`: zebra-rs restarting is
 a normal condition. Do not turn connection failures into exits.
 
-### Backend shape (`src/firewall.rs`, `src/ipsec.rs`, `src/vrrp.rs`)
+### Backend shape (`src/firewall.rs`, `src/ipsec.rs`, `src/vrrp.rs`, `src/dhcp_relay.rs`)
 
-All three backends have the same structure, and new backends should keep it:
+All four backends have the same structure, and new backends should keep it:
 
 1. `subscribe::subscribe_json` opens a JSON-format `zebra.config.v1` subscription. The
    first event is always a snapshot of the whole subtree, then one whole-subtree document
@@ -105,19 +115,22 @@ All three backends have the same structure, and new backends should keep it:
    resyncs by simply re-applying the snapshot; applies must be idempotent.
 2. A `run` loop `select!`s between stream events and show requests.
 3. The JSON deserializes into a serde model (`FirewallConfig` / `IpsecConfig` /
-   `VrrpConfig`).
+   `VrrpConfig` / `Relay4Tree` + `Relay6Tree`).
 4. `render(&cfg) -> (text, warnings)` produces a complete artifact: a full nft script
    (starting with add+delete of the `zebra_firewall` tables, so replace and teardown are
    one atomic `nft -f -` transaction), a full `swanctl.conf` loaded with `swanctl -q`, or
-   a full `keepalived.conf` handed to `keepalived::apply` (compare-before-reload, then
-   `systemctl reload-or-restart`/`stop` on the template unit or SIGHUP to the pid file).
+   a full `keepalived.conf` handed to `keepalived::apply`, or a full `relay.json` handed to
+   `Relayd::apply`. Both go through `process::reload`: compare-before-reload, then
+   `systemctl reload-or-restart`/`stop` on the unit or SIGHUP to the pid file.
+   `relay.json` is built from the agent's own types (`dhcp_relay::config`, the
+   `dhcp-relay` crate's library), so the two cannot drift apart.
 5. Anything the renderer cannot express safely is skipped with a warning naming the
    rule/peer. Rendered output must always be syntactically valid; one bad rule must never
    wedge the whole commit.
 
 The renderers follow the VyOS templates line for line (vyos-1x `nftables.j2`,
-`swanctl.conf.j2`, `keepalived.conf.j2`); each module doc lists the deliberate deviations
-(table/chain naming `zebra_firewall` / `ZEBRA_*` so it coexists with VyOS, unapplied
+`swanctl.conf.j2`, `keepalived.conf.j2`, `dhcrelay{,6}.conf.j2`); each module doc lists
+the deliberate deviations (table/chain naming `zebra_firewall` / `ZEBRA_*` so it coexists with VyOS, unapplied
 sysctl/charon-level options, VRRP transition scripts as native `notify_*` lines, the
 three FRR-derived VRRP extension leaves, etc.). `design/vrrp.md` is the VRRP design and
 records why the VyOS `high-availability` wrapper was dropped. When adding a feature, check the VyOS template first and record any new
@@ -139,8 +152,9 @@ Firewall show answers from the last committed model plus live counters fetched f
 implementing only the `list-sas` / `list-conns` command-event streaming pattern) and
 from `ip xfrm` for state/policy. VRRP show sends keepalived its JSON signal and reads
 the dump from the instance directory (`src/keepalived.rs`); the summary appends
-`DISABLED` rows from the last committed model. `ShowRequest.json` selects JSON output
-(`vtyctl show -j`).
+`DISABLED` rows from the last committed model. DHCP relay show asks the relay agent's
+control socket for its counters (`src/relayd.rs`). `ShowRequest.json` selects JSON
+output (`vtyctl show -j`).
 
 ### Vendored protos (`proto/`)
 

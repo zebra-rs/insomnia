@@ -3,7 +3,7 @@
 //! counters as one line of JSON, anything else with an `error` object.
 //!
 //! ```sh
-//! echo stats | socat - UNIX-CONNECT:/run/insomnia/dhcp-relay/control
+//! echo stats | socat - UNIX-CONNECT:/run/insomnia-dhcp-relay/control
 //! ```
 
 use std::path::Path;

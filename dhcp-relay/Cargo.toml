@@ -19,7 +19,9 @@ clap = { version = "4", features = ["derive"] }
 # AF_PACKET sends, getifaddrs(3).
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# preserve_order: the counters keep their field order (vrf and interface
+# first) whichever workspace members the binary is built with.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt", "net", "signal", "time", "macros", "sync", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

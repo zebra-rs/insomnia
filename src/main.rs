@@ -1,15 +1,17 @@
-//! insomnia — out-of-process firewall / IPsec / VRRP enforcement daemon
-//! for zebra-rs.
+//! insomnia — out-of-process firewall / IPsec / VRRP / DHCP relay
+//! enforcement daemon for zebra-rs.
 //!
 //! zebra-rs owns the configuration (YANG schema, candidate/running
 //! stores, commit); insomnia enforces it: it subscribes to the
-//! `firewall`, `vpn ipsec` and `vrrp` running-config subtrees over the
+//! `firewall`, `vpn ipsec`, `vrrp`, `service dhcp-relay` and
+//! `service dhcpv6-relay` running-config subtrees over the
 //! zebra.config.v1 gRPC API (one whole-subtree JSON batch per
 //! touching commit, snapshot first) and renders them into nftables,
-//! strongSwan (swanctl) and keepalived state. It also registers as the
-//! zebra.show.v1 show provider for the three trees, so `show firewall`,
-//! `show vpn ipsec …` and `show vrrp …` on the zebra-rs CLI are
-//! answered here.
+//! strongSwan (swanctl), keepalived and insomnia-dhcp-relay state. It
+//! also registers as the zebra.show.v1 show provider for those trees,
+//! so `show firewall`, `show vpn ipsec …`, `show vrrp …` and
+//! `show dhcp[v6] relay statistics` on the zebra-rs CLI are answered
+//! here.
 //!
 //! Every connection retries forever: zebra-rs restarting is a normal
 //! condition, and the subscription's snapshot-first contract makes
@@ -22,13 +24,16 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 mod api;
+mod dhcp_relay;
 mod endpoint;
 mod firewall;
 mod ipsec;
 mod json;
 mod keepalived;
 mod pb;
+mod process;
 mod provider;
+mod relayd;
 mod subscribe;
 mod text;
 mod vici;
@@ -60,8 +65,8 @@ struct Args {
     /// How keepalived picks up a new config: `systemd` reloads or stops
     /// the template unit, `signal` sends SIGHUP to the instance's pid
     /// file (containers, the BDD harness).
-    #[arg(long, value_enum, default_value_t = keepalived::Control::Systemd)]
-    keepalived_control: keepalived::Control,
+    #[arg(long, value_enum, default_value_t = process::Control::Systemd)]
+    keepalived_control: process::Control,
 
     /// systemd template unit for keepalived instances; `@.` is replaced
     /// by `@<vrf>.`.
@@ -71,6 +76,26 @@ struct Args {
     /// LD_PRELOAD shim written into non-default VRF instances' env file.
     #[arg(long, default_value = "/usr/lib/insomnia/vrf.o")]
     vrf_preload: PathBuf,
+
+    /// Directory the DHCP relay backend renders relay.json into, for
+    /// the insomnia-dhcp-relay agent; also holds the agent's relay.pid
+    /// in signal mode.
+    #[arg(long, default_value = "/run/insomnia/dhcp-relay")]
+    dhcp_relay_dir: PathBuf,
+
+    /// How the relay agent picks up a new config: `systemd` starts,
+    /// reloads or stops its unit, `signal` sends SIGHUP to relay.pid
+    /// (containers, the BDD harness).
+    #[arg(long, value_enum, default_value_t = process::Control::Systemd)]
+    dhcp_relay_control: process::Control,
+
+    /// systemd unit of the relay agent.
+    #[arg(long, default_value = "insomnia-dhcp-relay.service")]
+    dhcp_relay_unit: String,
+
+    /// The relay agent's control socket (`show dhcp relay statistics`).
+    #[arg(long, default_value = "/run/insomnia-dhcp-relay/control")]
+    dhcp_relay_socket: PathBuf,
 }
 
 #[tokio::main]
@@ -86,6 +111,7 @@ async fn main() {
     let (firewall_show_tx, firewall_show_rx) = mpsc::channel(8);
     let (ipsec_show_tx, ipsec_show_rx) = mpsc::channel(8);
     let (vrrp_show_tx, vrrp_show_rx) = mpsc::channel(8);
+    let (dhcp_show_tx, dhcp_show_rx) = mpsc::channel(8);
 
     let ka = Arc::new(
         keepalived::Keepalived::new(
@@ -106,7 +132,23 @@ async fn main() {
         ipsec_show_rx,
     ));
     tokio::spawn(vrrp::run(args.host.clone(), ka, vrrp_show_rx));
+    let relayd = Arc::new(relayd::Relayd {
+        dir: args.dhcp_relay_dir,
+        control: args.dhcp_relay_control,
+        unit: args.dhcp_relay_unit,
+        socket: args.dhcp_relay_socket,
+    });
+    tokio::spawn(dhcp_relay::run(args.host.clone(), relayd, dhcp_show_rx));
 
     tracing::info!("insomnia started (zebra-rs at {})", args.host);
-    provider::run(args.host, firewall_show_tx, ipsec_show_tx, vrrp_show_tx).await;
+    provider::run(
+        args.host,
+        provider::Backends {
+            firewall: firewall_show_tx,
+            ipsec: ipsec_show_tx,
+            vrrp: vrrp_show_tx,
+            dhcp: dhcp_show_tx,
+        },
+    )
+    .await;
 }

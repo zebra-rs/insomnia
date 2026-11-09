@@ -13,29 +13,22 @@
 //! restarts insomnia, and killing the VRRP master for that would force
 //! a failover). insomnia writes the file and asks for a reload — via
 //! `systemctl` on the template unit, or by `SIGHUP` to the pid file for
-//! hosts without systemd and for the BDD namespaces. An empty config
-//! stops the unit in systemd mode; in signal mode it is reloaded, which
-//! makes keepalived withdraw every instance and idle.
+//! hosts without systemd and for the BDD namespaces (`process.rs`). An
+//! empty config stops the unit in systemd mode; in signal mode it is
+//! reloaded, which makes keepalived withdraw every instance and idle.
 //!
 //! `show vrrp` reads keepalived's JSON dump: send the JSON signal
 //! (`keepalived --signum=JSON`, SIGRTMIN+2 on this build), wait for
 //! `keepalived.json` in the instance directory, parse, delete.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-/// How a rendered config is pushed into the running keepalived.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum Control {
-    /// `systemctl reload-or-restart` / `stop` on the template unit.
-    Systemd,
-    /// `SIGHUP` to the pid in the instance's pid file; never starts
-    /// or stops a process.
-    Signal,
-}
+use crate::process::{self, live_pid, signal, write_if_changed};
+pub use crate::process::{Applied, Control};
 
 /// Per-daemon keepalived settings, shared by every instance.
 #[derive(Clone, Debug)]
@@ -62,19 +55,6 @@ pub struct InstancePaths {
     pub pid: PathBuf,
     pub json: PathBuf,
     pub env: PathBuf,
-}
-
-/// What [`apply`] did.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Applied {
-    /// Reloaded (or started) with the new file.
-    Loaded,
-    /// File identical to the one already in place; nothing reloaded.
-    Unchanged,
-    /// Empty config: the instance was stopped (systemd mode).
-    Stopped,
-    /// The file is in place but no keepalived was there to load it.
-    NotRunning,
 }
 
 /// Why [`collect_json`] returned nothing — the messages match VyOS's
@@ -201,76 +181,6 @@ impl Keepalived {
     }
 }
 
-async fn read_pid(path: &Path) -> Option<i32> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    text.trim().parse().ok()
-}
-
-fn alive(pid: i32) -> bool {
-    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
-}
-
-fn signal(pid: i32, sig: i32) -> std::io::Result<()> {
-    if unsafe { libc::kill(pid, sig) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-/// Live parent pid of an instance, if the pid file names a process
-/// that still exists.
-async fn live_pid(paths: &InstancePaths) -> Option<i32> {
-    read_pid(&paths.pid).await.filter(|&pid| alive(pid))
-}
-
-/// Write `content` to `path` atomically (temp file in the same
-/// directory, then rename) with the given mode.
-async fn write_atomic(path: &Path, content: &str, mode: u32) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = path.with_extension("zebra-tmp");
-    tokio::fs::write(&tmp, content)
-        .await
-        .with_context(|| format!("write {}", tmp.display()))?;
-    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .with_context(|| format!("rename into {}", path.display()))?;
-    Ok(())
-}
-
-/// Write only when the content differs, so an unchanged file keeps
-/// its mtime and no reload is triggered for nothing.
-async fn write_if_changed(path: &Path, content: &str, mode: u32) -> anyhow::Result<bool> {
-    let current = tokio::fs::read_to_string(path).await.ok();
-    if current.as_deref() == Some(content) {
-        return Ok(false);
-    }
-    write_atomic(path, content, mode).await?;
-    Ok(true)
-}
-
-async fn systemctl(verb: &str, unit: &str) -> anyhow::Result<Option<()>> {
-    let output = match tokio::process::Command::new("systemctl")
-        .args([verb, unit])
-        .output()
-        .await
-    {
-        Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    if !output.status.success() {
-        anyhow::bail!(
-            "systemctl {verb} {unit} exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(Some(()))
-}
-
 /// Put `conf` in place for instance `name` and get keepalived to load
 /// it. An empty `conf` means "no configuration": stop the unit in
 /// systemd mode, reload to an idle daemon in signal mode.
@@ -282,43 +192,14 @@ pub async fn apply(ka: &Keepalived, name: &str, conf: &str) -> anyhow::Result<Ap
     write_if_changed(&paths.env, &ka.env_for(name), 0o644).await?;
     // The config can hold an authentication password: owner-only.
     let changed = write_if_changed(&paths.conf, conf, 0o600).await?;
-    let empty = conf.is_empty();
-
-    match ka.control {
-        Control::Systemd => {
-            let unit = ka.unit_for(name);
-            let verb = match (empty, changed) {
-                (true, false) => return Ok(Applied::Unchanged),
-                (true, true) => "stop",
-                (false, true) => "reload-or-restart",
-                // Same file, but make sure the daemon is actually up
-                // (a no-op when it is).
-                (false, false) => "start",
-            };
-            match systemctl(verb, &unit).await? {
-                None => Ok(Applied::NotRunning),
-                Some(()) => Ok(match (empty, changed) {
-                    (true, _) => Applied::Stopped,
-                    (false, true) => Applied::Loaded,
-                    (false, false) => Applied::Unchanged,
-                }),
-            }
-        }
-        Control::Signal => {
-            let Some(pid) = live_pid(&paths).await else {
-                return Ok(Applied::NotRunning);
-            };
-            if !changed {
-                return Ok(Applied::Unchanged);
-            }
-            signal(pid, libc::SIGHUP).with_context(|| format!("SIGHUP keepalived pid {pid}"))?;
-            Ok(if empty {
-                Applied::Stopped
-            } else {
-                Applied::Loaded
-            })
-        }
-    }
+    process::reload(
+        ka.control,
+        &ka.unit_for(name),
+        &paths.pid,
+        changed,
+        conf.is_empty(),
+    )
+    .await
 }
 
 /// keepalived's JSON dump for instance `name`: one object per VRRP
@@ -328,7 +209,7 @@ pub async fn collect_json(
     name: &str,
 ) -> Result<Vec<serde_json::Value>, CollectError> {
     let paths = ka.instance(name);
-    let Some(pid) = live_pid(&paths).await else {
+    let Some(pid) = live_pid(&paths.pid).await else {
         return Err(CollectError::NotRunning);
     };
     let _ = tokio::fs::remove_file(&paths.json).await;
@@ -354,6 +235,7 @@ pub async fn collect_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn ka(dir: &Path, control: Control) -> Keepalived {
         Keepalived::new(

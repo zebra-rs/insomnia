@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
+use dhcp_relay::config;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
-mod config;
 mod control;
 mod ifaces;
 mod relay;
@@ -41,9 +41,16 @@ struct Args {
     #[arg(long, default_value = "/run/insomnia/dhcp-relay/relay.json")]
     config: PathBuf,
 
-    /// Unix socket answering `stats` with the counters as JSON.
-    #[arg(long, default_value = "/run/insomnia/dhcp-relay/control")]
+    /// Unix socket answering `stats` with the counters as JSON. The
+    /// default sits in the systemd unit's own runtime directory, which
+    /// belongs to the unit's dynamic user.
+    #[arg(long, default_value = "/run/insomnia-dhcp-relay/control")]
     control: PathBuf,
+
+    /// Write the process id here, for insomnia's signal mode (no
+    /// systemd: containers, the BDD harness); removed on exit.
+    #[arg(long)]
+    pid_file: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -66,6 +73,11 @@ async fn main() -> anyhow::Result<()> {
         async move { control::serve(&path, stats).await }
     });
 
+    if let Some(path) = &args.pid_file {
+        std::fs::write(path, format!("{}\n", std::process::id()))
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    }
+
     let (tx, mut rx) = mpsc::channel(256);
     let mut relay = relay::Relay::new(stats, tx);
     relay.reload(&args.config);
@@ -86,6 +98,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let _ = std::fs::remove_file(&args.control);
+    if let Some(path) = &args.pid_file {
+        let _ = std::fs::remove_file(path);
+    }
     tracing::info!("insomnia-dhcp-relay stopped");
     Ok(())
 }
