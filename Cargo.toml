@@ -123,6 +123,13 @@ assets = [
   ["packaging/systemd/insomnia-kea-dhcp4@.service", "usr/lib/systemd/system/", "644"],
   ["packaging/systemd/insomnia-kea-dhcp6@.service", "usr/lib/systemd/system/", "644"],
   ["packaging/systemd/insomnia-dhcp-relay.service", "usr/lib/systemd/system/", "644"],
+  # A drop-in for the zebra-rs package's unit that starts zebra-rs with
+  # --feature insomnia, without which the trees insomnia enforces do not
+  # exist. A drop-in rather than a unit, so cargo-deb generates no
+  # maintainer-script fragments for it, and installing insomnia never
+  # restarts zebra-rs (routing would flap): it applies at zebra-rs's next
+  # start.
+  ["packaging/systemd/zebra-rs.service.d/insomnia.conf", "usr/lib/systemd/system/zebra-rs.service.d/", "644"],
 ]
 
 # systemd unit. cargo-deb adds packaging/systemd/insomnia.service as an asset

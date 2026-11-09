@@ -24,18 +24,27 @@ does and when you would change it.
 The firewall backend has no options: it runs `nft` from `PATH` and
 always owns the `zebra_firewall` tables.
 
-## Before you start: zebra-rs `--feature iso`
+## Before you start: zebra-rs `--feature insomnia`
 
-The `firewall`, `vpn ipsec` and `vrrp` configuration trees belong to
-the optional ISO feature set of zebra-rs. Unless zebra-rs is started
-with
+The configuration trees insomnia enforces belong to an optional feature
+set of zebra-rs. Unless zebra-rs is started with
 
 ```console
-$ zebra-rs --feature iso
+$ zebra-rs --feature insomnia
 ```
 
 those subtrees do not exist in the schema, so insomnia has no
-configuration to enforce.
+configuration to enforce. (`--feature iso`, the earlier name, still
+works, with a warning at startup.)
+
+The insomnia package sets this up for the packaged zebra-rs: it ships
+`/usr/lib/systemd/system/zebra-rs.service.d/insomnia.conf`, a drop-in
+that adds `--feature insomnia` to `zebra-rs.service`. It takes effect
+the next time zebra-rs starts; installing insomnia does not restart
+zebra-rs, so after a first install run `systemctl restart zebra-rs`. To
+start zebra-rs differently, put a drop-in of the same name in
+`/etc/systemd/system/zebra-rs.service.d/`, which replaces the
+package's.
 
 ## Connecting to zebra-rs
 
