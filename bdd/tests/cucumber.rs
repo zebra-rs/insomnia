@@ -23,6 +23,9 @@ pub struct World {
     /// offset — a line from an earlier run must never satisfy an
     /// assertion about the daemon started now.
     log_offsets: HashMap<String, u64>,
+    /// The last `dhcp_client.sh` run per `<ns>/<iface>/<family>`, for the
+    /// lease-variable steps.
+    dhcp_runs: HashMap<String, DhcpRun>,
 }
 
 impl World {
@@ -47,11 +50,28 @@ impl World {
         format!("logs/{}.insomnia.log", scoped)
     }
 
+    /// `logs/<ns>.<name>.log`: a daemon a node script started besides
+    /// zebra-rs and insomnia (`relay`, `kea4`, `kea6`).
+    fn node_log(scoped: &str, name: &str) -> String {
+        format!("logs/{}.{}.log", scoped, name)
+    }
+
     /// Remember where the namespace's daemon logs end right now; called by
     /// every daemon-start step so the `*_log_since` readers return only
-    /// this run's lines.
+    /// this run's lines. Covers every `logs/<ns>.*.log` already there, so
+    /// the logs of daemons a node script starts are marked too.
     fn mark_log_start(&mut self, scoped: &str) {
-        for path in [Self::zebra_log(scoped), Self::insomnia_log(scoped)] {
+        let mut paths = vec![Self::zebra_log(scoped), Self::insomnia_log(scoped)];
+        let prefix = format!("{}.", scoped);
+        if let Ok(entries) = fs::read_dir("logs") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && name.ends_with(".log") {
+                    paths.push(format!("logs/{}", name));
+                }
+            }
+        }
+        for path in paths {
             let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             self.log_offsets.insert(path, len);
         }
@@ -3206,6 +3226,325 @@ async fn kernel_route_eventually_gone(world: &mut World, prefix: String, namespa
         "kernel route {} in namespace {} still present after {} attempts\nlast `ip route show {}` output:\n{}\n{}",
         prefix, scoped, ATTEMPTS, prefix, last_output, diag
     );
+}
+
+#[given(expr = "log {string} in namespace {string} should eventually contain {string}")]
+#[when(expr = "log {string} in namespace {string} should eventually contain {string}")]
+#[then(expr = "log {string} in namespace {string} should eventually contain {string}")]
+async fn node_log_eventually_contains(
+    world: &mut World,
+    name: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let path = World::node_log(&scoped, &name);
+    const ATTEMPTS: u32 = 30;
+    for i in 0..ATTEMPTS {
+        if world.log_since(&path).contains(&needle) {
+            println!("✓ log {} contains '{}'", path, needle);
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    let content = world.log_since(&path);
+    let tail: Vec<&str> = content.lines().rev().take(20).collect();
+    panic!(
+        "log {} did not contain '{}' after {} attempts; last lines:\n{}",
+        path,
+        needle,
+        ATTEMPTS,
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    );
+}
+
+// ── DHCP clients ─────────────────────────────────────────────────────────
+//
+// `tests/scripts/dhcp_client.sh` runs one dhcpcd in a private mount
+// namespace and prints `address:` / `lease:` / `result:` lines; these
+// steps parse them. On failure they dump the relay agent's and every Kea
+// server's log of this run, so a failed lease is diagnosable from the
+// scenario output alone.
+
+/// One `dhcp_client.sh` run.
+#[derive(Debug, Default, Clone)]
+struct DhcpRun {
+    /// Global addresses on the interface afterwards (`10.1.0.50/24`).
+    addresses: Vec<String>,
+    /// `dhcpcd -U` variables, quotes stripped.
+    lease: Vec<(String, String)>,
+    obtained: bool,
+    raw: String,
+}
+
+async fn run_dhcp_client(
+    world: &World,
+    namespace: &str,
+    iface: &str,
+    family: u8,
+    conf: Option<&str>,
+    timeout: u32,
+) -> DhcpRun {
+    let scoped = world.ns(namespace);
+    let timeout = timeout.to_string();
+    let family_arg = family.to_string();
+    let mut args = vec!["-t", timeout.as_str(), iface, family_arg.as_str()];
+    // Several dhcpcd.conf lines are separated by `;`.
+    if let Some(conf) = conf {
+        args.extend(conf.split(';').map(str::trim).filter(|l| !l.is_empty()));
+    }
+    let raw = netns::exec_in_netns(&scoped, "tests/scripts/dhcp_client.sh", &args)
+        .await
+        .unwrap_or_else(|e| panic!("dhcp_client.sh in {}: {}", scoped, e));
+    let mut run = DhcpRun {
+        raw: raw.clone(),
+        ..Default::default()
+    };
+    for line in raw.lines() {
+        if let Some(addr) = line.strip_prefix("address: ") {
+            run.addresses.push(addr.trim().to_string());
+        } else if let Some(var) = line.strip_prefix("lease: ")
+            && let Some((key, value)) = var.split_once('=')
+        {
+            let value = value.trim().trim_matches('\'').to_string();
+            run.lease.push((key.trim().to_string(), value));
+        } else if line.starts_with("result: lease") {
+            run.obtained = true;
+        }
+    }
+    run
+}
+
+/// The relay agent's and every server's log of this run, for failures.
+fn dhcp_diagnostics(world: &World) -> String {
+    let prefix = format!("{}_", world.feature_tag);
+    let mut out = String::new();
+    let mut paths: Vec<String> = fs::read_dir("logs")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| {
+                    n.starts_with(&prefix)
+                        && [".relay.log", ".kea4.log", ".kea6.log"]
+                            .iter()
+                            .any(|s| n.ends_with(s))
+                })
+                .map(|n| format!("logs/{}", n))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    for path in paths {
+        let content = world.log_since(&path);
+        let tail: Vec<&str> = content.lines().rev().take(15).collect();
+        out.push_str(&format!("--- {} (last lines)\n", path));
+        out.push_str(&tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+        out.push('\n');
+    }
+    out
+}
+
+/// Whether `addr` (`10.1.0.50/24` or bare) lies in `spec`: a prefix
+/// `10.1.0.0/24`, or an inclusive range `10.1.0.50-10.1.0.59`.
+fn address_in(addr: &str, spec: &str) -> bool {
+    use std::net::IpAddr;
+    let value = |ip: IpAddr| -> (bool, u128) {
+        match ip {
+            IpAddr::V4(v4) => (false, u32::from(v4) as u128),
+            IpAddr::V6(v6) => (true, u128::from(v6)),
+        }
+    };
+    let Ok(ip) = addr.split('/').next().unwrap_or_default().parse::<IpAddr>() else {
+        return false;
+    };
+    let (v6, n) = value(ip);
+    if let Some((lo, hi)) = spec.split_once('-') {
+        let (Ok(lo), Ok(hi)) = (lo.trim().parse::<IpAddr>(), hi.trim().parse::<IpAddr>()) else {
+            panic!("bad address range {:?}", spec);
+        };
+        let ((lv6, lo), (hv6, hi)) = (value(lo), value(hi));
+        return v6 == lv6 && v6 == hv6 && lo <= n && n <= hi;
+    }
+    let Some((net, len)) = spec.split_once('/') else {
+        panic!("bad prefix or range {:?}", spec);
+    };
+    let (Ok(net), Ok(len)) = (net.parse::<IpAddr>(), len.parse::<u32>()) else {
+        panic!("bad prefix {:?}", spec);
+    };
+    let (nv6, net) = value(net);
+    let bits = if v6 { 128 } else { 32 };
+    if v6 != nv6 || len > bits {
+        return false;
+    }
+    let shift = bits - len;
+    let mask = if shift >= 128 { 0 } else { u128::MAX << shift };
+    let width = if v6 { u128::MAX } else { u32::MAX as u128 };
+    (n & mask & width) == (net & mask & width)
+}
+
+async fn dhcp_should_obtain(
+    world: &mut World,
+    family: u8,
+    conf: Option<String>,
+    iface: String,
+    namespace: String,
+    spec: String,
+) {
+    let run = run_dhcp_client(world, &namespace, &iface, family, conf.as_deref(), 25).await;
+    let key = format!("{}/{}/{}", world.ns(&namespace), iface, family);
+    let hit = run.addresses.iter().find(|a| address_in(a, &spec)).cloned();
+    world.dhcp_runs.insert(key, run.clone());
+    match hit {
+        Some(addr) if run.obtained => {
+            println!(
+                "✓ DHCPv{} client {}:{} obtained {}",
+                family, namespace, iface, addr
+            )
+        }
+        _ => panic!(
+            "DHCPv{} client on {} in {} did not obtain an address in {}\n{}\n{}",
+            family,
+            iface,
+            world.ns(&namespace),
+            spec,
+            run.raw,
+            dhcp_diagnostics(world)
+        ),
+    }
+}
+
+async fn dhcp_should_not_obtain(world: &mut World, family: u8, iface: String, namespace: String) {
+    let run = run_dhcp_client(world, &namespace, &iface, family, None, 10).await;
+    assert!(
+        !run.obtained && run.addresses.is_empty(),
+        "DHCPv{} client on {} in {} obtained a lease it should not have:\n{}",
+        family,
+        iface,
+        world.ns(&namespace),
+        run.raw
+    );
+    println!(
+        "✓ DHCPv{} client {}:{} obtained nothing",
+        family, namespace, iface
+    );
+}
+
+fn dhcp_lease_should_have(
+    world: &World,
+    family: u8,
+    iface: String,
+    namespace: String,
+    name: String,
+    value: String,
+) {
+    let key = format!("{}/{}/{}", world.ns(&namespace), iface, family);
+    let run = world.dhcp_runs.get(&key).unwrap_or_else(|| {
+        panic!(
+            "no DHCPv{} client run on {} in {} yet",
+            family, iface, namespace
+        )
+    });
+    assert!(
+        run.lease.iter().any(|(k, v)| *k == name && *v == value),
+        "DHCPv{} lease on {} in {} has no {}={:?}; lease variables:\n{}",
+        family,
+        iface,
+        world.ns(&namespace),
+        name,
+        value,
+        run.lease
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    println!(
+        "✓ DHCPv{} lease {}:{} has {}={}",
+        family, namespace, iface, name, value
+    );
+}
+
+#[then(
+    expr = "DHCPv4 client on interface {string} in namespace {string} should obtain an address in {string}"
+)]
+async fn dhcp4_obtains(world: &mut World, iface: String, namespace: String, spec: String) {
+    dhcp_should_obtain(world, 4, None, iface, namespace, spec).await;
+}
+
+#[then(
+    expr = "DHCPv4 client with {string} on interface {string} in namespace {string} should obtain an address in {string}"
+)]
+async fn dhcp4_with_obtains(
+    world: &mut World,
+    conf: String,
+    iface: String,
+    namespace: String,
+    spec: String,
+) {
+    dhcp_should_obtain(world, 4, Some(conf), iface, namespace, spec).await;
+}
+
+#[then(
+    expr = "DHCPv6 client on interface {string} in namespace {string} should obtain an address in {string}"
+)]
+async fn dhcp6_obtains(world: &mut World, iface: String, namespace: String, spec: String) {
+    dhcp_should_obtain(world, 6, None, iface, namespace, spec).await;
+}
+
+#[then(
+    expr = "DHCPv6 client with {string} on interface {string} in namespace {string} should obtain an address in {string}"
+)]
+async fn dhcp6_with_obtains(
+    world: &mut World,
+    conf: String,
+    iface: String,
+    namespace: String,
+    spec: String,
+) {
+    dhcp_should_obtain(world, 6, Some(conf), iface, namespace, spec).await;
+}
+
+#[then(
+    expr = "DHCPv4 client on interface {string} in namespace {string} should not obtain an address"
+)]
+async fn dhcp4_not_obtains(world: &mut World, iface: String, namespace: String) {
+    dhcp_should_not_obtain(world, 4, iface, namespace).await;
+}
+
+#[then(
+    expr = "DHCPv6 client on interface {string} in namespace {string} should not obtain an address"
+)]
+async fn dhcp6_not_obtains(world: &mut World, iface: String, namespace: String) {
+    dhcp_should_not_obtain(world, 6, iface, namespace).await;
+}
+
+#[then(
+    expr = "the DHCPv4 lease on interface {string} in namespace {string} should have {string} {string}"
+)]
+async fn dhcp4_lease_has(
+    world: &mut World,
+    iface: String,
+    namespace: String,
+    name: String,
+    value: String,
+) {
+    dhcp_lease_should_have(world, 4, iface, namespace, name, value);
+}
+
+#[then(
+    expr = "the DHCPv6 lease on interface {string} in namespace {string} should have {string} {string}"
+)]
+async fn dhcp6_lease_has(
+    world: &mut World,
+    iface: String,
+    namespace: String,
+    name: String,
+    value: String,
+) {
+    dhcp_lease_should_have(world, 6, iface, namespace, name, value);
 }
 
 #[then("the test environment should be clean")]

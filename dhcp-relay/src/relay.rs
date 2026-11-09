@@ -474,6 +474,10 @@ impl Relay {
             }
         }
         let sent = errors < binding.servers.len();
+        tracing::debug!(
+            "dhcp6 {ifname}: request relayed to {} servers",
+            binding.servers.len() - errors
+        );
         self.count(Family::V6, vrf, ifname, |c| {
             c.send_errors += errors as u64;
             if sent {

@@ -1,6 +1,8 @@
 # DHCP server and relay BDD suite, with VRFs — design
 
-Status: proposal, 2026-11-08. Nothing here is implemented. This replaces the
+Status: phases R1 and R2 implemented, 2026-11-09 (`@dhcp_relay`,
+`@dhcpv6_relay`, `@dhcp_relay_vrf`; what changed on the way is in §10). The
+server phases wait for the Kea backend. This replaces the
 BDD paragraph of `design/dhcp.md` §16 and expands work item 12 of
 `design/dhcp.md` §17 into one item per feature (§9).
 
@@ -375,8 +377,8 @@ Everything else reuses existing steps:
 
 | Phase | Features | Needs | Ready |
 |:--|:--|:--|:--|
-| R1 | `@dhcp_relay`, `@dhcpv6_relay` | the relay branches; §4 scripts and §5 steps | now |
-| R2 | `@dhcp_relay_vrf` | the same | now |
+| R1 | `@dhcp_relay`, `@dhcpv6_relay` | the relay branches; §4 scripts and §5 steps | implemented |
+| R2 | `@dhcp_relay_vrf` | the same | implemented |
 | S1 | `@dhcp_server`, `@dhcpv6_server` | `design/dhcp.md` §17 items 1–9 (schema, Kea control, backends, show, PD routes) | after the server track |
 | S2 | `@dhcp_server_relay` | S1 | after S1 |
 | V1 | `@dhcp_server_vrf` | the server trees' `vrf` lists, per-VRF Kea, and `design/process.md` items 2 and 4 | after the process track |
@@ -384,3 +386,49 @@ Everything else reuses existing steps:
 
 The scripts and steps of §4 and §5 land with phase R1. Each later phase adds
 only its feature, configs and docs page (`make -C bdd docs`).
+
+## 10. Implementation notes (R1, R2)
+
+What the implementation changed against §3–§6, and why:
+
+- **zebra-rs readiness.** The `show …` steps fail on the first connection
+  error instead of retrying, and a debug zebra-rs takes seconds to start
+  serving. Each router therefore waits for `insomnia log … "show provider
+  registered"` first: insomnia registers only once zebra-rs accepts gRPC.
+- **Kea and DAD.** kea-dhcp6 joins ff02::1:2 through a socket on the
+  interface's link-local address. Started while that address is tentative,
+  it fails the bind, never retries, and serves unicast only.
+  `kea_server.sh` waits for duplicate address detection to finish. The same
+  trap applies to an insomnia-managed Kea (`design/dhcp.md` §7.3).
+- **Client identity.** `clientid ""` makes dhcpcd 10.0.6 send a one-byte
+  client identifier, which Kea refuses ("identifier is too short").
+  `dhcp_client.sh` sends `clientid 01:<mac>` instead.
+- **Lease variables** come from a dhcpcd hook (`new_*` variables on every
+  bind), not `dhcpcd -U`: in dhcpcd 10, `-U` asks a running daemon, and a
+  one-shot run has exited by then.
+- **Log marks.** The harness marked only zebra-rs's and insomnia's logs
+  when a node started, so log steps could match an earlier run's lines.
+  `mark_log_start` now marks every `logs/<ns>.*.log`, and Kea servers are
+  started with `I spawn` so their logs are marked too.
+- **Kea from an unpacked tree.** The harness runs scripts through
+  `sudo ip netns exec … env PATH=…`, which drops other variables, so
+  `KEA_PREFIX` is recorded in the stage (`.stage/kea-prefix`) by
+  `make stage KEA_PREFIX=…`.
+- **§3.1 scenario 5.** The forged reply is asserted by the agent's drop log
+  and the `wrong-upstream` counter. The "nothing reaches `c2`" capture was
+  left out: the agent never sends a packet it drops.
+- **§3.1 scenario 7** became: with `lan2` removed, `c2` gets nothing and
+  `c1` still gets its lease; re-adding `lan2` brings `c2` back.
+- **§3.2 scenario 6** uses `ff02::1:2`, not `ff05::1:3`, as the multicast
+  server address: Kea 2.4.1 joins only ff02::1:2 (its sockets show
+  `[ff02::1:2]%s0`).
+- **§3.3 scenario 4** checks the routes with `ip route show vrf …` and the
+  main table, `ping` from the default VRF failing, and
+  `ip vrf exec red ping` reaching `sred`. Scenario 7 removes the members'
+  `vrf` leaves before `delete vrf blue` (they are leafrefs to it), keeps
+  the relay config, and checks that the agent waits for the VRF device and
+  recovers when the config is applied again.
+- **The agent** now logs a successful upward DHCPv6 relay at debug level,
+  as it already did for DHCPv4; without it, a lost packet could not be
+  placed between the agent and the server.
+

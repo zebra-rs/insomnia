@@ -1,0 +1,43 @@
+{
+  "Dhcp6": {
+    "interfaces-config": {
+      "interfaces": [
+        "s0/2001:db8::10"
+      ]
+    },
+    "lease-database": {
+      "type": "memfile",
+      "persist": false
+    },
+    "data-directory": "@DIR@",
+    "server-id": {
+      "type": "EN",
+      "enterprise-id": 2495,
+      "identifier": "0123456789",
+      "persist": false
+    },
+    "valid-lifetime": 600,
+    "subnet6": [
+      {
+        "id": 1,
+        "subnet": "2001:db8:1::/64",
+        "pools": [
+          {
+            "pool": "2001:db8:1::100 - 2001:db8:1::14f"
+          }
+        ]
+      }
+    ],
+    "loggers": [
+      {
+        "name": "kea-dhcp6",
+        "output_options": [
+          {
+            "output": "stdout"
+          }
+        ],
+        "severity": "INFO"
+      }
+    ]
+  }
+}
