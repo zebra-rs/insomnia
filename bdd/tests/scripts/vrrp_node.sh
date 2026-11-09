@@ -22,11 +22,43 @@
 # empty file keepalived idles ("no configuration to run") until the
 # first render arrives.
 #
+# `vrrp_node.sh NS keepalived-vrf VRF` starts VRF's keepalived on a
+# running node, once zebra-rs has created the VRF: it re-enters the
+# node's mount namespace through the default instance's pid and runs
+# keepalived under `ip vrf exec VRF`, the kernel hook the units'
+# `BPFProgram=` binding uses (design/process.md §4), on the instance
+# directory /run/insomnia/vrrp/VRF. It starts on the configuration
+# insomnia already rendered there, if any.
+#
 # Requires keepalived installed on the host — see the Makefile target
 # comment.
 set -e
 
 NS="$1" # scoped namespace name, e.g. vrrp_pair_r1
+
+if [ "${2:-}" = keepalived-vrf ]; then
+    VRF="$3"
+    if [ -z "$VRRP_NODE_INNER" ]; then
+        exec nsenter -t "$(cat "/tmp/$NS.keepalived.pid")" -m --wd="$PWD" -- \
+            env VRRP_NODE_INNER=1 "$0" "$@"
+    fi
+    INST="/run/insomnia/vrrp/$VRF"
+    mkdir -p "$INST"
+    [ -e "$INST/keepalived.conf" ] || : >"$INST/keepalived.conf"
+    TMPDIR="$INST" setsid ip vrf exec "$VRF" keepalived --dont-fork \
+        --use-file "$INST/keepalived.conf" \
+        --pid "$INST/keepalived.pid" \
+        --vrrp_pid "$INST/keepalived_vrrp.pid" \
+        --checkers_pid "$INST/keepalived_checkers.pid" \
+        --log-console --log-detail >>"logs/$NS.keepalived-$VRF.log" 2>&1 </dev/null &
+    echo $! >"/tmp/$NS.keepalived-$VRF.pid"
+    for _ in $(seq 1 50); do
+        [ -s "$INST/keepalived.pid" ] && exit 0
+        sleep 0.1
+    done
+    echo "vrrp_node: keepalived ($VRF) did not write its pid file" >&2
+    exit 1
+fi
 
 if [ -z "$VRRP_NODE_INNER" ]; then
     command -v keepalived >/dev/null || {

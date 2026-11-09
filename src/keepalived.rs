@@ -4,9 +4,9 @@
 //! `--keepalived-dir/<vrf>/` (`default` for the global routing table):
 //! the rendered `keepalived.conf`, the parent/child pid files and the
 //! dump files keepalived writes on request (steered there through
-//! `TMPDIR`, which keepalived honours). The first release only ever
-//! creates `default`; the per-VRF expansion (design/vrrp.md §13) adds
-//! instances without changing any path. A VRF instance's unit is bound
+//! `TMPDIR`, which keepalived honours). `default` serves the top of the
+//! `vrrp` tree, and each `vrrp vrf <name>` entry its own instance
+//! (design/vrrp.md §13). A VRF instance's unit is bound
 //! to its VRF by the pinned socket program its template names
 //! (`BPFProgram=`, design/process.md §4), which `process::reload` makes
 //! sure of before the unit starts; the instance is registered as

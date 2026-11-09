@@ -1,8 +1,8 @@
 # Process management and daemons in a VRF — design
 
-Status: implemented, 2026-11-09 (zebra-rs branch `process-cli`, insomnia
-branch `process-vrf`): work items 1–4 of §11; item 5 (`vrrp vrf <name>`)
-remains. §14 records what the implementation changed. §4 replaces the
+Status: implemented, 2026-11-09: work items 1–4 of §11 (zebra-rs branch
+`process-cli`, insomnia branch `process-vrf`) and item 5, `vrrp vrf <name>`
+(branches `vrrp-vrf`). §14 records what the implementation changed. §4 replaces the
 `LD_PRELOAD` shim of `design/vrrp.md` §13 and the VRF-binding options of
 `design/dhcp.md` §19.
 
@@ -375,7 +375,7 @@ Kea instances per VRF follow `design/dhcp.md`, using item 4.
 
 Status 2026-11-09: items 1, 2 and 4 built together (with Kea per VRF on top
 of 4); item 3 came with the DHCP server (`design/dhcp.md` §17 item 3);
-item 5 remains.
+item 5 followed (`design/vrrp.md` §13).
 
 ## 12. Open questions
 

@@ -207,7 +207,12 @@ async fn main() {
         args.vici_socket,
         ipsec_show_rx,
     ));
-    tokio::spawn(vrrp::run(args.host.clone(), ka, vrrp_show_rx));
+    tokio::spawn(vrrp::run(
+        args.host.clone(),
+        ka,
+        links.clone(),
+        vrrp_show_rx,
+    ));
     let relayd = Arc::new(relayd::Relayd {
         dir: args.dhcp_relay_dir,
         control: args.dhcp_relay_control,

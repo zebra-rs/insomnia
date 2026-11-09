@@ -17,7 +17,11 @@
 #      back;
 #   4. a missing pin refuses the start (AssertPathExists= in [Unit]);
 #   5. the VRF deleted and re-created under a new interface index is
-#      re-pinned and the instance runs bound to the new device.
+#      re-pinned and the instance runs bound to the new device;
+#   6. `vrrp vrf red …` starts insomnia-keepalived@red.service (the shipped
+#      template, keepalived from the host) bound the same way, holding
+#      the virtual address on red's member, and back after the VRF is
+#      re-created.
 #
 #   STAGE       bdd/.stage (zebra-rs, vtyctl, insomnia; `make -C bdd stage`)
 #   KEA_PREFIX  an unpacked copy of Ubuntu's Kea packages (dpkg-deb -x)
@@ -71,7 +75,12 @@ cleanup() {
         systemctl stop "$u" 2>/dev/null
         systemctl reset-failed "$u" 2>/dev/null
     done
+    for u in $(systemctl list-units --all --plain --no-legend 'insomnia-keepalived@*' | awk '{print $1}'); do
+        systemctl stop "$u" 2>/dev/null
+        systemctl reset-failed "$u" 2>/dev/null
+    done
     rm -rf "$UNITS"/insomnia-kea-dhcp4@.service "$UNITS"/insomnia-kea-dhcp4@.service.d
+    rm -rf "$UNITS"/insomnia-keepalived@.service "$UNITS"/insomnia-keepalived@.service.d
     systemctl daemon-reload
     rm -rf /sys/fs/bpf/insomnia /run/insomnia /var/lib/insomnia /run/insomnia-pvt
     ip netns del pvt 2>/dev/null
@@ -105,6 +114,13 @@ Environment=LD_LIBRARY_PATH=/opt/kea/lib KEA_LFC_EXECUTABLE=/opt/kea/sbin/kea-lf
 ExecStart=
 ExecStart=/bin/sh -c "exec /opt/kea/sbin/kea-dhcp4 -c /run/insomnia/kea/%i/kea-dhcp4.conf"
 EOF
+# keepalived from the host, as shipped; only the namespace is the test's.
+install -m 0644 "$HERE/../../../packaging/systemd/insomnia-keepalived@.service" "$UNITS/"
+mkdir -p "$UNITS/insomnia-keepalived@.service.d"
+cat >"$UNITS/insomnia-keepalived@.service.d/test.conf" <<EOF
+[Service]
+NetworkNamespacePath=/run/netns/pvt
+EOF
 systemctl daemon-reload
 
 # --- zebra-rs and insomnia in pvt --------------------------------------
@@ -118,7 +134,7 @@ mkdir -p /run/insomnia-pvt
 # attaches. A real insomnia runs in the host's mount namespace too.
 nsenter --net=/run/netns/pvt env RUST_LOG=info "$STAGE/bin/insomnia" \
     --kea-control systemd --kea-hooks-dir /opt/kea/hooks \
-    --keepalived-control signal --keepalived-dir /run/insomnia-pvt/vrrp \
+    --keepalived-control systemd \
     --dhcp-relay-control signal --dhcp-relay-dir /run/insomnia-pvt/relay \
     --swanctl-dir /run/insomnia-pvt/swanctl --vici-socket /run/insomnia-pvt/charon.vici \
     >"$LOGS/insomnia.log" 2>&1 &
@@ -132,6 +148,9 @@ set interface lanred ipv4 address 10.1.0.1/24
 set service dhcp-server vrf red shared-network-name T subnet 10.1.0.0/24 subnet-id 1
 set service dhcp-server vrf red shared-network-name T subnet 10.1.0.0/24 range 0 start 10.1.0.100
 set service dhcp-server vrf red shared-network-name T subnet 10.1.0.0/24 range 0 stop 10.1.0.149
+set vrrp vrf red group G interface lanred
+set vrrp vrf red group G vrid 10
+set vrrp vrf red group G address 10.1.0.254/24
 EOF
 vty apply -f "$LOGS/red.conf" >/dev/null
 
@@ -173,6 +192,16 @@ check "an instance whose VRF has no pin is refused" sh -c \
 check "… by its assert (AssertPathExists= on the pin)" contains "AssertResult=no" \
     systemctl show -p AssertResult insomnia-kea-dhcp4@blue.service
 
+# --- 6a. keepalived in red -------------------------------------------------
+eventually "insomnia-keepalived@red.service is active" systemctl is-active --quiet insomnia-keepalived@red.service
+check "the unit attaches red's program" contains "sock_create:/sys/fs/bpf/insomnia/vrf/red" \
+    systemctl show -p BPFProgram insomnia-keepalived@red.service
+eventually "keepalived@red holds the virtual address on red's member" contains "10.1.0.254/24" \
+    ip -n pvt -4 addr show dev lanred
+check "show process lists keepalived@red running" matches "^keepalived@red +red +running +up +[0-9]+" \
+    show "show process keepalived@red"
+check "show vrrp vrf red reads that instance" contains "MASTER" show "show vrrp vrf red"
+
 # --- 5. the VRF deleted and re-created ------------------------------------
 vty apply -c "delete interface lanred vrf" >/dev/null
 vty apply -c "delete vrf red" >/dev/null
@@ -185,6 +214,11 @@ check "for its new interface index ($RED → $RED2)" grep -qx "$RED2" /run/insom
 eventually "the instance runs again" systemctl is-active --quiet insomnia-kea-dhcp4@red.service
 eventually "bound to the new VRF device" contains "%red" ip netns exec pvt ss -ulnp sport = :67
 check "and serves" contains "address: 10.1.0." ip netns exec pvtc "$HERE/dhcp_client.sh" -t 15 c0 4
+
+# --- 6b. keepalived after the VRF came back ----------------------------------
+eventually "insomnia-keepalived@red.service runs again" systemctl is-active --quiet insomnia-keepalived@red.service
+eventually "and holds the virtual address again" contains "10.1.0.254/24" \
+    ip -n pvt -4 addr show dev lanred
 
 echo
 echo "$PASS passed, $FAIL failed (logs in $LOGS)"

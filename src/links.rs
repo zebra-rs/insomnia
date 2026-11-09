@@ -83,7 +83,13 @@ pub fn reserved_vrf(scope: &str) -> String {
 /// The one warning for an instance whose VRF does not exist, whichever
 /// backend renders it (`scope` is the instance's config path).
 pub fn missing_vrf(scope: &str, vrf: &str) -> String {
-    format!("{scope}: VRF {vrf} does not exist; not started")
+    format!("{scope}: {}", missing_vrf_reason(vrf))
+}
+
+/// [`missing_vrf`] without its scope, for a renderer whose caller adds
+/// the scope to every warning.
+pub fn missing_vrf_reason(vrf: &str) -> String {
+    format!("VRF {vrf} does not exist; not started")
 }
 
 impl Snapshot {
