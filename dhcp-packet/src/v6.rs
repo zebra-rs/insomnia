@@ -5,11 +5,13 @@
 //! them, Relay-Message (9) and Interface-ID (18), and both are plain
 //! byte strings; the Relay-Message payload is itself a message, which
 //! the caller parses with another [`Message::parse`] call when it needs
-//! to look inside.
+//! to look inside. [`params`] decodes the options a client uses.
 
 use std::net::Ipv6Addr;
 
 use crate::Error;
+
+pub mod params;
 
 /// UDP port of clients.
 pub const CLIENT_PORT: u16 = 546;
@@ -44,10 +46,49 @@ pub mod msg {
     pub const DHCPV4_RESPONSE: u8 = 21;
 }
 
-/// Option codes the relay uses.
+/// Option codes (RFC 8415 §21 unless noted).
 pub mod opt {
+    pub const CLIENT_ID: u16 = 1;
+    pub const SERVER_ID: u16 = 2;
+    pub const IA_NA: u16 = 3;
+    pub const IA_TA: u16 = 4;
+    pub const IA_ADDR: u16 = 5;
+    pub const ORO: u16 = 6;
+    pub const PREFERENCE: u16 = 7;
+    pub const ELAPSED_TIME: u16 = 8;
     pub const RELAY_MSG: u16 = 9;
+    pub const AUTH: u16 = 11;
+    pub const UNICAST: u16 = 12;
+    pub const STATUS_CODE: u16 = 13;
+    pub const RAPID_COMMIT: u16 = 14;
+    pub const USER_CLASS: u16 = 15;
+    pub const VENDOR_CLASS: u16 = 16;
+    pub const VENDOR_OPTS: u16 = 17;
     pub const INTERFACE_ID: u16 = 18;
+    pub const RECONF_MSG: u16 = 19;
+    pub const RECONF_ACCEPT: u16 = 20;
+    /// RFC 3646.
+    pub const DNS_SERVERS: u16 = 23;
+    /// RFC 3646.
+    pub const DOMAIN_LIST: u16 = 24;
+    pub const IA_PD: u16 = 25;
+    pub const IA_PREFIX: u16 = 26;
+    pub const INFORMATION_REFRESH_TIME: u16 = 32;
+    /// RFC 5908.
+    pub const NTP_SERVER: u16 = 56;
+    pub const SOL_MAX_RT: u16 = 82;
+    pub const INF_MAX_RT: u16 = 83;
+}
+
+/// Status codes (RFC 8415 §21.13).
+pub mod status {
+    pub const SUCCESS: u16 = 0;
+    pub const UNSPEC_FAIL: u16 = 1;
+    pub const NO_ADDRS_AVAIL: u16 = 2;
+    pub const NO_BINDING: u16 = 3;
+    pub const NOT_ON_LINK: u16 = 4;
+    pub const USE_MULTICAST: u16 = 5;
+    pub const NO_PREFIX_AVAIL: u16 = 6;
 }
 
 /// msg-type, transaction-id.
@@ -126,27 +167,10 @@ impl Message {
     /// Fails only when an option is longer than its 16-bit length field
     /// can describe.
     pub fn emit(&self) -> Result<Vec<u8>, Error> {
-        let mut out = Vec::new();
-        let options = match self {
-            Message::Client(m) => {
-                out.push(m.msg_type);
-                out.extend_from_slice(&m.transaction_id.to_be_bytes()[1..]);
-                &m.options
-            }
-            Message::Relay(m) => {
-                out.extend_from_slice(&[m.msg_type, m.hop_count]);
-                out.extend_from_slice(&m.link_address.octets());
-                out.extend_from_slice(&m.peer_address.octets());
-                &m.options
-            }
-        };
-        for option in options {
-            let len = u16::try_from(option.data.len()).map_err(|_| Error::TooLong)?;
-            out.extend_from_slice(&option.code.to_be_bytes());
-            out.extend_from_slice(&len.to_be_bytes());
-            out.extend_from_slice(&option.data);
+        match self {
+            Message::Client(m) => m.emit(),
+            Message::Relay(m) => m.emit(),
         }
-        Ok(out)
     }
 
     pub fn msg_type(&self) -> u8 {
@@ -164,7 +188,43 @@ impl Message {
     }
 }
 
+impl ClientMessage {
+    /// A message with no options yet.
+    pub fn new(msg_type: u8, transaction_id: u32) -> ClientMessage {
+        ClientMessage {
+            msg_type,
+            transaction_id,
+            options: Vec::new(),
+        }
+    }
+
+    /// The first instance of `code`.
+    pub fn option(&self, code: u16) -> Option<&[u8]> {
+        self.options
+            .iter()
+            .find(|o| o.code == code)
+            .map(|o| o.data.as_slice())
+    }
+
+    /// See [`Message::emit`].
+    pub fn emit(&self) -> Result<Vec<u8>, Error> {
+        let mut out = vec![self.msg_type];
+        out.extend_from_slice(&self.transaction_id.to_be_bytes()[1..]);
+        emit_options(&mut out, &self.options)?;
+        Ok(out)
+    }
+}
+
 impl RelayMessage {
+    /// See [`Message::emit`].
+    pub fn emit(&self) -> Result<Vec<u8>, Error> {
+        let mut out = vec![self.msg_type, self.hop_count];
+        out.extend_from_slice(&self.link_address.octets());
+        out.extend_from_slice(&self.peer_address.octets());
+        emit_options(&mut out, &self.options)?;
+        Ok(out)
+    }
+
     /// The first instance of `code`.
     pub fn option(&self, code: u16) -> Option<&[u8]> {
         self.options
@@ -183,7 +243,9 @@ impl RelayMessage {
     }
 }
 
-fn parse_options(mut rest: &[u8]) -> Result<Vec<Dhcp6Option>, Error> {
+/// Options filling `rest` exactly: a message's, or those nested in an
+/// option's value (IA_NA, IA_ADDR, …).
+pub(crate) fn parse_options(mut rest: &[u8]) -> Result<Vec<Dhcp6Option>, Error> {
     let mut options = Vec::new();
     while !rest.is_empty() {
         if rest.len() < 4 {
@@ -203,6 +265,18 @@ fn parse_options(mut rest: &[u8]) -> Result<Vec<Dhcp6Option>, Error> {
         rest = tail;
     }
     Ok(options)
+}
+
+/// Appends `options` in wire form. Fails when a value is longer than the
+/// 16-bit length field can describe.
+pub(crate) fn emit_options(out: &mut Vec<u8>, options: &[Dhcp6Option]) -> Result<(), Error> {
+    for option in options {
+        let len = u16::try_from(option.data.len()).map_err(|_| Error::TooLong)?;
+        out.extend_from_slice(&option.code.to_be_bytes());
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&option.data);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -357,6 +431,7 @@ mod tests {
                 {
                     let _ = Message::parse(inner);
                 }
+                let _ = params::Params::from_options(m.options());
             }
         }
     }

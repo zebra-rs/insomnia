@@ -4,12 +4,15 @@
 //! The vendor area is decoded only when it starts with the magic
 //! cookie; a plain BOOTP message keeps its vendor area as raw bytes,
 //! because a relay forwards those untouched. `sname` and `file` stay
-//! raw too, even under option overload (52): a relay never needs the
-//! options they may hold, and keeping them raw round-trips them exactly.
+//! raw too, even under option overload (52), so they round-trip exactly;
+//! a client reads the options they carry through
+//! [`Packet::merged_options`]. [`params`] decodes the option values.
 
 use std::net::Ipv4Addr;
 
 use crate::Error;
+
+pub mod params;
 
 /// UDP port of servers and relay agents.
 pub const SERVER_PORT: u16 = 67;
@@ -37,12 +40,49 @@ pub const HEADER_LEN: usize = 236;
 /// The smallest BOOTP message (RFC 1542 §2.1); shorter output is padded.
 pub const MIN_LEN: usize = 300;
 
-/// Option codes the relay looks at.
+/// Message types: the value of option 53 (RFC 2132 §9.6).
+pub mod msg {
+    pub const DISCOVER: u8 = 1;
+    pub const OFFER: u8 = 2;
+    pub const REQUEST: u8 = 3;
+    pub const DECLINE: u8 = 4;
+    pub const ACK: u8 = 5;
+    pub const NAK: u8 = 6;
+    pub const RELEASE: u8 = 7;
+    pub const INFORM: u8 = 8;
+}
+
+/// Option codes (RFC 2132 unless noted).
 pub mod opt {
     pub const PAD: u8 = 0;
+    pub const SUBNET_MASK: u8 = 1;
+    pub const ROUTER: u8 = 3;
+    pub const DNS_SERVER: u8 = 6;
+    pub const HOST_NAME: u8 = 12;
+    pub const DOMAIN_NAME: u8 = 15;
+    pub const INTERFACE_MTU: u8 = 26;
+    pub const BROADCAST_ADDRESS: u8 = 28;
+    pub const NTP_SERVER: u8 = 42;
+    pub const REQUESTED_ADDRESS: u8 = 50;
+    pub const LEASE_TIME: u8 = 51;
     pub const OVERLOAD: u8 = 52;
     pub const MESSAGE_TYPE: u8 = 53;
+    pub const SERVER_ID: u8 = 54;
+    pub const PARAMETER_REQUEST_LIST: u8 = 55;
+    pub const MESSAGE: u8 = 56;
+    pub const MAX_MESSAGE_SIZE: u8 = 57;
+    pub const RENEWAL_TIME: u8 = 58;
+    pub const REBINDING_TIME: u8 = 59;
+    pub const VENDOR_CLASS_ID: u8 = 60;
+    pub const CLIENT_ID: u8 = 61;
+    /// RFC 3004.
+    pub const USER_CLASS: u8 = 77;
+    /// RFC 3046.
     pub const RELAY_AGENT_INFORMATION: u8 = 82;
+    /// RFC 3397.
+    pub const DOMAIN_SEARCH: u8 = 119;
+    /// RFC 3442.
+    pub const CLASSLESS_STATIC_ROUTE: u8 = 121;
     pub const END: u8 = 255;
 }
 
@@ -222,6 +262,57 @@ impl Packet {
                 true
             }
             Body::Bootp(_) => false,
+        }
+    }
+
+    /// The options as a receiver must read them: every instance of a code
+    /// concatenated into one value (RFC 3396), taken from the options
+    /// field, then `file`, then `sname`, the last two only when option 52
+    /// hands them over to options (RFC 2131 §4.1). Codes keep the order of
+    /// their first instance, and option 52 itself is left out. Empty for
+    /// BOOTP. Fails when an overloaded field does not parse.
+    pub fn merged_options(&self) -> Result<Vec<DhcpOption>, Error> {
+        let mut merged = Merged::default();
+        merged.extend(self.options());
+        let overload = merged
+            .options
+            .iter()
+            .find(|o| o.code == opt::OVERLOAD)
+            .and_then(|o| o.data.first().copied())
+            .unwrap_or(0);
+        if overload & 1 != 0 {
+            merged.extend(&parse_options(&self.file)?);
+        }
+        if overload & 2 != 0 {
+            merged.extend(&parse_options(&self.sname)?);
+        }
+        let mut options = merged.options;
+        options.retain(|o| o.code != opt::OVERLOAD);
+        Ok(options)
+    }
+}
+
+/// Options merged by code, RFC 3396 style, in one pass.
+#[derive(Default)]
+pub(crate) struct Merged {
+    pub(crate) options: Vec<DhcpOption>,
+    /// Where each code sits in `options`, so merging stays linear.
+    index: Vec<Option<usize>>,
+}
+
+impl Merged {
+    pub(crate) fn extend<'a>(&mut self, options: impl IntoIterator<Item = &'a DhcpOption>) {
+        if self.index.is_empty() {
+            self.index = vec![None; 256];
+        }
+        for option in options {
+            match self.index[usize::from(option.code)] {
+                Some(i) => self.options[i].data.extend_from_slice(&option.data),
+                None => {
+                    self.index[usize::from(option.code)] = Some(self.options.len());
+                    self.options.push(option.clone());
+                }
+            }
         }
     }
 }
@@ -605,6 +696,8 @@ mod tests {
                 for o in p.options() {
                     let _ = RelayAgentInfo::parse(&o.data);
                 }
+                let _ = p.merged_options();
+                let _ = params::Params::from_packet(&p);
             }
         }
     }

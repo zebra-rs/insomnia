@@ -14,7 +14,8 @@ insomnia-dhcp-relay state, and registers as the show provider so `show firewall 
 `show vpn ipsec …`, `show vrrp …`, `show dhcp[v6] server [vrf <name>] …` and
 `show dhcp[v6] relay [vrf <name>] statistics` typed at the zebra-rs CLI are answered by this
 process. The DHCP relay agent itself, `insomnia-dhcp-relay`, is a second binary in this
-workspace (`dhcp-relay/`, with the packet codec in `dhcp-packet/`); `kea-notify`
+workspace (`dhcp-relay/`, with the packet codec in `dhcp-packet/`, a vendored copy of
+zebra-rs's `crates/dhcp-packet`); `kea-notify`
 (`src/bin/insomnia-kea-notify.rs`) is the tiny program Kea's run_script hook calls for
 DHCPv6 lease events. The backends were moved out of the zebra-rs
 tree, not rewritten — `src/api.rs` deliberately mirrors the in-process channel types they
@@ -215,12 +216,18 @@ Kea (`lease{4,6}-get-all`, `stat-lease{4,6}-get`) and maps subnet ids to shared 
 with the last configuration Kea accepted; static mappings come from that configuration. `ShowRequest.json` selects JSON
 output (`vtyctl show -j`).
 
-### Vendored protos (`proto/`)
+### Vendored from zebra-rs (`proto/`, `dhcp-packet/`)
 
 `config.proto` (zebra.config.v1) and `show.proto` (zebra.show.v1) are copies of
 zebra-rs's machine-facing APIs, exposed through `src/pb.rs`. `src/endpoint.rs` is copied
 from zebra-rs's `vtyctl` so both accept the same `--host` spellings. Keep these in sync
 with zebra-rs rather than diverging locally.
+
+`dhcp-packet/` is an identical copy of zebra-rs's `crates/dhcp-packet`, the DHCPv4/DHCPv6
+codec its DHCP client and this relay share. zebra-rs owns it: change it there, then
+`rsync -a --delete ../zebra-rs/crates/dhcp-packet/ dhcp-packet/` and check with
+`diff -r ../zebra-rs/crates/dhcp-packet dhcp-packet`. Its `Cargo.toml` spells out every
+field instead of inheriting from a workspace so the file is the same in both repos.
 
 ### Tests
 
