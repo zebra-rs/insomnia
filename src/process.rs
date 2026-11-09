@@ -491,6 +491,20 @@ impl Registry {
         }
     }
 
+    /// Whether a bare `show process` lists the instance. A backend
+    /// registers every instance it applies, also with an empty
+    /// configuration (it must still be able to stop the unit), so an
+    /// idle instance is left out: one the configuration does not want,
+    /// no operator holds, that is not running and whose last apply did
+    /// not fail. With nothing configured the list is empty.
+    /// `show process <name>` answers for any registered instance.
+    fn listed(&self, entry: &Entry, seen: &Observed) -> bool {
+        entry.wanted
+            || self.held(&entry.name)
+            || entry.error.is_some()
+            || !matches!(seen.state.as_str(), "stopped" | "not-installed")
+    }
+
     async fn show(&self, name: Option<&str>, json: bool) -> String {
         let entries: Vec<Entry> = match name {
             Some(name) => match self.entry(name) {
@@ -503,6 +517,9 @@ impl Registry {
         let mut list = Vec::new();
         for entry in &entries {
             let seen = observe(&entry.runner).await;
+            if name.is_none() && !self.listed(entry, &seen) {
+                continue;
+            }
             let admin = self.admin(entry);
             if json {
                 list.push(json!({
@@ -533,6 +550,9 @@ impl Registry {
         }
         if json {
             return serde_json::to_string_pretty(&list).unwrap_or_default() + "\n";
+        }
+        if rows.is_empty() {
+            return String::new();
         }
         table(
             &[
@@ -772,6 +792,42 @@ mod tests {
                 .await,
             "% Nothing configured for \"keepalived@default\"\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing configured: the instances the backends registered while
+    /// applying an empty configuration are idle and not listed, but
+    /// still answer by name; a hold or a failed apply lists them.
+    #[tokio::test]
+    async fn idle_instances_are_not_listed() {
+        let (reg, dir) = registry("idle");
+        reg.register(
+            "dhcp-relay",
+            None,
+            Runner::External(dir.join("relay.pid")),
+            false,
+        );
+        reg.register(
+            "keepalived@default",
+            Some("default"),
+            Runner::External(dir.join("keepalived.pid")),
+            false,
+        );
+        assert_eq!(reg.order("/show/process", &[], false).await, "");
+        assert_eq!(reg.order("/show/process", &[], true).await, "[]\n");
+        let one = reg
+            .order("/show/process", &["keepalived@default".into()], false)
+            .await;
+        assert!(
+            one.contains("keepalived@default  default  stopped  down"),
+            "{one}"
+        );
+
+        reg.hold("keepalived@default").unwrap();
+        reg.note("dhcp-relay", Some("relay.json: permission denied".into()));
+        let text = reg.order("/show/process", &[], false).await;
+        assert!(text.contains("keepalived@default"), "{text}");
+        assert!(text.contains("dhcp-relay"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

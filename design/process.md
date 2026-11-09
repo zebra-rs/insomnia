@@ -410,12 +410,15 @@ What the implementation changed against §4–§10, and why:
   backend stops the instance too, and starts it again on the re-created
   VRF through `bind`; both paths end with the instance bound to the new
   device.
-- **Registration.** Backends register an instance when they apply it, so
-  `show process` lists what insomnia has rendered: the relay agent and
-  keepalived@default always, Kea instances once they have served (an
-  instance that never had a configuration is never started and not
-  listed). The Admin column is `up` (the configuration wants it), `held`
-  (`stop process`) or `down` (nothing configured).
+- **Registration.** Backends register an instance when they apply it,
+  also with an empty configuration: the relay agent and keepalived@default
+  are applied on every snapshot so that their units can be stopped, Kea
+  instances once they have served. A bare `show process` lists only the
+  instances that are not idle: the configuration wants it, an operator
+  holds it, it is running anyway, or its last apply failed. With nothing
+  configured it prints nothing; `show process <name>` still answers for
+  any registered instance. The Admin column is `up` (the configuration
+  wants it), `held` (`stop process`) or `down` (nothing configured).
 - **Signal mode.** Kea's pid file is its own (`<kea-dir>/<vrf>/
   kea-dhcp4.kea-dhcp4.pid`, from `KEA_PIDFILE_DIR`); keepalived's and the
   relay agent's are the ones the harness names.
