@@ -121,6 +121,21 @@ impl Drop for Sock {
     }
 }
 
+/// The drop reason of a request on an interface outside its binding's
+/// VRF.
+const WRONG_VRF: &str = "wrong-vrf";
+
+/// Whether a request on an interface whose master is `master` may be
+/// relayed into `vrf`: for a VRF binding, only from a member of that VRF
+/// (its master is the VRF device). insomnia renders only member
+/// interfaces (it knows which masters are VRFs, and checks the global
+/// table's bindings too); this is the agent's own check for the moment
+/// between an interface moving and the next render, so that a client on
+/// one VRF's segment is never relayed to another VRF's servers.
+fn in_vrf(vrf: &str, master: Option<&str>) -> bool {
+    vrf == DEFAULT_VRF || master == Some(vrf)
+}
+
 pub struct Relay {
     config: Config,
     ifaces: Ifaces,
@@ -363,6 +378,10 @@ impl Relay {
     fn request4(&self, binding: &Binding4, data: &[u8]) {
         let (vrf, ifname) = (binding.vrf.as_str(), binding.interface.as_str());
         self.count(Family::V4, vrf, ifname, |c| c.received += 1);
+        if !in_vrf(vrf, sys::master(ifname).as_deref()) {
+            tracing::debug!("dhcp4 {ifname}: request dropped: not a member of VRF {vrf}");
+            return self.count(Family::V4, vrf, ifname, |c| c.drop(WRONG_VRF));
+        }
         let forward = match v4::request(data, binding, &self.ifaces) {
             Ok(forward) => forward,
             Err(drop) => {
@@ -441,6 +460,10 @@ impl Relay {
     fn request6(&self, binding: &Binding6, data: &[u8], peer: Ipv6Addr) {
         let (vrf, ifname) = (binding.vrf.as_str(), binding.interface.as_str());
         self.count(Family::V6, vrf, ifname, |c| c.received += 1);
+        if !in_vrf(vrf, sys::master(ifname).as_deref()) {
+            tracing::debug!("dhcp6 {ifname}: request dropped: not a member of VRF {vrf}");
+            return self.count(Family::V6, vrf, ifname, |c| c.drop(WRONG_VRF));
+        }
         let packet = match v6::upward(data, peer, binding, &self.ifaces) {
             Ok(packet) => packet,
             Err(drop) => {
@@ -559,5 +582,36 @@ async fn read_loop(key: SockKey, fd: Arc<AsyncFd<OwnedFd>>, tx: mpsc::Sender<Inc
         if tx.send(incoming).await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vrf_membership() {
+        assert!(in_vrf("red", Some("red")));
+        assert!(
+            !in_vrf("red", None),
+            "a global-table interface is not in red"
+        );
+        assert!(!in_vrf("red", Some("blue")));
+        assert!(
+            !in_vrf("red", Some("br0")),
+            "a bridge port is not a VRF member"
+        );
+        // The global table's bindings are left to insomnia's render.
+        assert!(in_vrf(DEFAULT_VRF, None));
+        assert!(in_vrf(DEFAULT_VRF, Some("br0")));
+    }
+
+    /// sysfs names the master of an enslaved device; the test host's
+    /// loopback has none.
+    #[test]
+    fn sysfs_master() {
+        assert_eq!(sys::master("lo"), None);
+        assert_eq!(sys::master("../etc"), None);
+        assert_eq!(sys::master(""), None);
     }
 }

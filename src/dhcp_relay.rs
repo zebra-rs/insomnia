@@ -15,6 +15,16 @@
 //! snapshot, so a reconnect or an insomnia restart never reloads the
 //! agent with one family missing.
 //!
+//! Every interface an instance names must be a member of the
+//! instance's VRF (`links::Snapshot::member`), the rule the DHCP server
+//! and VRRP follow too: an interface in another VRF, or one that does
+//! not exist, is skipped with a warning, and an instance whose VRF does
+//! not exist is not started. Otherwise a VRF instance would relay a
+//! client on an interface of another VRF into its own VRF's servers.
+//! The backend re-renders after every link change (`crate::links`), so
+//! an interface that appears or moves is picked up; the agent checks a
+//! VRF instance's membership again per request.
+//!
 //! VyOS's verify() rules become warnings, and what fails one is
 //! skipped; the rest is still served:
 //! - an instance needs a `server` (v4), and an upstream interface with
@@ -48,6 +58,7 @@ use tokio::sync::mpsc;
 
 use crate::api::ShowRequest;
 use crate::json::{Flex, de_flex_vec, de_presence};
+use crate::links::{Snapshot, missing_vrf, reserved_vrf};
 use crate::process::Applied;
 use crate::relayd::Relayd;
 use crate::text::table;
@@ -66,6 +77,9 @@ const DEFAULT_MAX_SIZE: u16 = 576;
 struct Trees {
     v4: Option<Relay4Tree>,
     v6: Option<Relay6Tree>,
+    /// The warnings of the last render, so link churn does not repeat
+    /// them.
+    warnings: Vec<String>,
 }
 
 /// Backend task: JSON subscriptions to both relay subtrees (snapshot
@@ -73,7 +87,12 @@ struct Trees {
 /// with the show orders the provider routes here. Reconnects with
 /// backoff when either stream drops; the fresh snapshots re-render
 /// relay.json, and an unchanged file is not reloaded.
-pub async fn run(host: String, relayd: Arc<Relayd>, mut show_rx: mpsc::Receiver<ShowRequest>) {
+pub async fn run(
+    host: String,
+    relayd: Arc<Relayd>,
+    mut links: tokio::sync::watch::Receiver<Arc<Snapshot>>,
+    mut show_rx: mpsc::Receiver<ShowRequest>,
+) {
     loop {
         let mut v4 = crate::subscribe::subscribe_json(&host, V4_PATH).await;
         let mut v6 = crate::subscribe::subscribe_json(&host, V6_PATH).await;
@@ -83,7 +102,8 @@ pub async fn run(host: String, relayd: Arc<Relayd>, mut show_rx: mpsc::Receiver<
                 msg = v4.message() => match msg {
                     Ok(Some(event)) => {
                         trees.v4 = parse("dhcp-relay", &event.json);
-                        apply(&relayd, &trees).await;
+                        let snapshot = links.borrow().clone();
+                        apply(&relayd, &mut trees, &snapshot).await;
                     }
                     Ok(None) => break,
                     Err(err) => {
@@ -94,7 +114,8 @@ pub async fn run(host: String, relayd: Arc<Relayd>, mut show_rx: mpsc::Receiver<
                 msg = v6.message() => match msg {
                     Ok(Some(event)) => {
                         trees.v6 = parse("dhcpv6-relay", &event.json);
-                        apply(&relayd, &trees).await;
+                        let snapshot = links.borrow().clone();
+                        apply(&relayd, &mut trees, &snapshot).await;
                     }
                     Ok(None) => break,
                     Err(err) => {
@@ -102,6 +123,14 @@ pub async fn run(host: String, relayd: Arc<Relayd>, mut show_rx: mpsc::Receiver<
                         break;
                     }
                 },
+                changed = links.changed() => {
+                    if changed.is_err() {
+                        // The watcher is gone; keep serving config events.
+                        std::future::pending::<()>().await;
+                    }
+                    let snapshot = links.borrow_and_update().clone();
+                    apply(&relayd, &mut trees, &snapshot).await;
+                }
                 Some(req) = show_rx.recv() => process_show(&relayd, req).await,
             }
         }
@@ -122,13 +151,16 @@ fn parse<T: for<'de> Deserialize<'de> + Default>(tree: &str, json: &str) -> Opti
     }
 }
 
-async fn apply(relayd: &Relayd, trees: &Trees) {
+async fn apply(relayd: &Relayd, trees: &mut Trees, links: &Snapshot) {
     let (Some(v4), Some(v6)) = (&trees.v4, &trees.v6) else {
         return;
     };
-    let (config, warnings) = render(v4, v6);
-    for warn in &warnings {
-        tracing::warn!("dhcp-relay: {warn}");
+    let (config, warnings) = render(v4, v6, links);
+    if warnings != trees.warnings {
+        for warn in &warnings {
+            tracing::warn!("dhcp-relay: {warn}");
+        }
+        trees.warnings = warnings;
     }
     let empty = config.dhcp4.is_empty() && config.dhcp6.is_empty();
     let text = match serde_json::to_string_pretty(&config) {
@@ -273,29 +305,51 @@ pub struct Upstream6 {
 // ---------------------------------------------------------------
 
 /// Both trees → the agent's config, plus a warning for everything
-/// skipped.
-pub fn render(v4: &Relay4Tree, v6: &Relay6Tree) -> (Config, Vec<String>) {
+/// skipped. `links` decides VRF membership.
+pub fn render(v4: &Relay4Tree, v6: &Relay6Tree, links: &Snapshot) -> (Config, Vec<String>) {
     let mut config = Config::default();
     let mut warnings = Vec::new();
 
     let mut seen = BTreeSet::new();
-    let v4_instances = std::iter::once((DEFAULT_VRF.to_string(), &v4.default)).chain(
-        v4.vrf
-            .iter()
-            .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.relay))),
-    );
+    let mut reserved4 = false;
+    let v4_instances: Vec<(String, &Relay4)> =
+        std::iter::once((DEFAULT_VRF.to_string(), &v4.default))
+            .chain(
+                v4.vrf
+                    .iter()
+                    .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.relay)))
+                    .filter(|(name, _)| {
+                        reserved4 |= name == DEFAULT_VRF;
+                        name != DEFAULT_VRF
+                    }),
+            )
+            .collect();
+    if reserved4 {
+        warnings.push(reserved_vrf("service dhcp-relay"));
+    }
     for (vrf, relay) in v4_instances {
-        render4(&vrf, relay, &mut seen, &mut config, &mut warnings);
+        render4(&vrf, relay, links, &mut seen, &mut config, &mut warnings);
     }
 
     let mut seen = BTreeSet::new();
-    let v6_instances = std::iter::once((DEFAULT_VRF.to_string(), &v6.default)).chain(
-        v6.vrf
-            .iter()
-            .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.relay))),
-    );
+    let mut reserved6 = false;
+    let v6_instances: Vec<(String, &Relay6)> =
+        std::iter::once((DEFAULT_VRF.to_string(), &v6.default))
+            .chain(
+                v6.vrf
+                    .iter()
+                    .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.relay)))
+                    .filter(|(name, _)| {
+                        reserved6 |= name == DEFAULT_VRF;
+                        name != DEFAULT_VRF
+                    }),
+            )
+            .collect();
+    if reserved6 {
+        warnings.push(reserved_vrf("service dhcpv6-relay"));
+    }
     for (vrf, relay) in v6_instances {
-        render6(&vrf, relay, &mut seen, &mut config, &mut warnings);
+        render6(&vrf, relay, links, &mut seen, &mut config, &mut warnings);
     }
     (config, warnings)
 }
@@ -312,6 +366,7 @@ fn scope(tree: &str, vrf: &str) -> String {
 fn render4(
     vrf: &str,
     relay: &Relay4,
+    links: &Snapshot,
     seen: &mut BTreeSet<String>,
     config: &mut Config,
     warnings: &mut Vec<String>,
@@ -320,6 +375,10 @@ fn render4(
         return;
     }
     let scope = scope("dhcp-relay", vrf);
+    if !links.has_vrf(vrf) {
+        warnings.push(missing_vrf(&scope, vrf));
+        return;
+    }
 
     let mut servers = Vec::new();
     for server in &relay.server {
@@ -332,13 +391,19 @@ fn render4(
         list.iter()
             .map(|i| i.to_string())
             .filter(|name| {
-                let lo = name == "lo";
-                if lo {
+                if name == "lo" {
                     warnings.push(format!(
                         "{scope}: {what} lo: the loopback interface is not supported; skipped"
                     ));
+                    return false;
                 }
-                !lo
+                match links.member(vrf, name) {
+                    Ok(()) => true,
+                    Err(why) => {
+                        warnings.push(format!("{scope}: {what} {name} {why}; skipped"));
+                        false
+                    }
+                }
             })
             .collect()
     };
@@ -416,6 +481,7 @@ fn render4(
 fn render6(
     vrf: &str,
     relay: &Relay6,
+    links: &Snapshot,
     seen: &mut BTreeSet<String>,
     config: &mut Config,
     warnings: &mut Vec<String>,
@@ -424,12 +490,20 @@ fn render6(
         return;
     }
     let scope = scope("dhcpv6-relay", vrf);
+    if !links.has_vrf(vrf) {
+        warnings.push(missing_vrf(&scope, vrf));
+        return;
+    }
 
     let mut servers = Vec::new();
     for upstream in &relay.upstream_interface {
         let Some(name) = upstream.name.as_ref().map(|n| n.to_string()) else {
             continue;
         };
+        if let Err(why) = links.member(vrf, &name) {
+            warnings.push(format!("{scope}: upstream-interface {name} {why}; skipped"));
+            continue;
+        }
         if upstream.address.is_empty() {
             warnings.push(format!(
                 "{scope}: upstream-interface {name} has no address; skipped"
@@ -471,6 +545,12 @@ fn render6(
         let Some(interface) = listen.name.as_ref().map(|n| n.to_string()) else {
             continue;
         };
+        if let Err(why) = links.member(vrf, &interface) {
+            warnings.push(format!(
+                "{scope}: listen-interface {interface} {why}; skipped"
+            ));
+            continue;
+        }
         let link_address = match &listen.address {
             None => None,
             Some(address) => match address.to_string().parse::<Ipv6Addr>() {
@@ -532,9 +612,12 @@ where
 // ---------------------------------------------------------------
 
 async fn process_show(relayd: &Relayd, req: ShowRequest) {
-    let (family, label) = match req.path.as_str() {
-        "/show/dhcp/relay/statistics" => ("dhcp4", "DHCP"),
-        "/show/dhcpv6/relay/statistics" => ("dhcp6", "DHCPv6"),
+    // `show dhcp[v6] relay [vrf <name>] statistics`.
+    let (family, label, vrf) = match req.path.as_str() {
+        "/show/dhcp/relay/statistics" => ("dhcp4", "DHCP", None),
+        "/show/dhcpv6/relay/statistics" => ("dhcp6", "DHCPv6", None),
+        "/show/dhcp/relay/vrf/statistics" => ("dhcp4", "DHCP", req.args.first().cloned()),
+        "/show/dhcpv6/relay/vrf/statistics" => ("dhcp6", "DHCPv6", req.args.first().cloned()),
         _ => {
             let _ = req.resp.send(String::from("% Unknown dhcp show command\n"));
             return;
@@ -542,7 +625,13 @@ async fn process_show(relayd: &Relayd, req: ShowRequest) {
     };
     let out = match relayd.stats().await {
         Ok(stats) => {
-            let rows = stats[family].as_array().cloned().unwrap_or_default();
+            let rows: Vec<serde_json::Value> = stats[family]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|row| vrf.as_ref().is_none_or(|v| row["vrf"].as_str() == Some(v)))
+                .collect();
             if req.json {
                 format!("{:#}\n", serde_json::Value::Array(rows))
             } else {
@@ -627,10 +716,25 @@ mod tests {
     const V4_JSON: &str = r#"{"listen-interface": ["eth1","eth2"],"relay-options":{"hop-count":4,"relay-agents-packets":"replace"},"server": ["192.0.2.10","192.0.2.11"],"upstream-interface": ["eth0"],"vrf": [{"name":"red","disable":null,"listen-interface": ["eth3"],"server": ["198.51.100.10"],"upstream-interface": ["eth4"]}]}"#;
     const V6_JSON: &str = r#"{"listen-interface": [{"name":"eth1","address":"2001:db8:1::1"},{"name":"eth2"}],"max-hop-count":8,"upstream-interface": [{"name":"eth0","address": ["2001:db8::10","ff05::1:3"]}],"use-interface-id-option":null,"vrf": [{"name":"red","listen-interface": [{"name":"eth3"}],"upstream-interface": [{"name":"eth4","address": ["2001:db8:4::10"]}]}]}"#;
 
+    /// eth0–eth2 in the global table; eth3–eth5 enslaved to VRF red.
+    fn links() -> Snapshot {
+        use crate::dhcp_server::tests::{link, snapshot};
+        let mut all = vec![link(2, "red", Some("vrf"), &[])];
+        for (i, name) in ["eth0", "eth1", "eth2"].iter().enumerate() {
+            all.push(link(10 + i as u32, name, None, &[]));
+        }
+        for (i, name) in ["eth3", "eth4", "eth5"].iter().enumerate() {
+            let (mut l, a) = link(20 + i as u32, name, None, &[]);
+            l.master = Some(2);
+            all.push((l, a));
+        }
+        snapshot(&all)
+    }
+
     fn render_str(v4: &str, v6: &str) -> (Config, Vec<String>) {
         let v4: Relay4Tree = serde_json::from_str(v4).unwrap();
         let v6: Relay6Tree = serde_json::from_str(v6).unwrap();
-        render(&v4, &v6)
+        render(&v4, &v6, &links())
     }
 
     /// The marshal contract renders to exactly this relay.json, and the
@@ -792,33 +896,80 @@ mod tests {
     }
 
     /// `lo` is dropped, the rest of the instance served; an interface
-    /// claimed by two instances goes to the first.
+    /// that is not a member of the instance's VRF is skipped, in both
+    /// directions: a default-VRF interface named by `vrf red` (which
+    /// would relay a default-VRF client into red's servers) and a red
+    /// member named by the default instance.
     #[test]
-    fn loopback_and_duplicates() {
+    fn loopback_and_vrf_membership() {
         let (config, warnings) = render_str(
-            r#"{"listen-interface":["lo","eth1"],"server":["192.0.2.10"],"upstream-interface":["eth0"],
-                "vrf":[{"name":"red","listen-interface":["eth1"],"server":["192.0.2.20"],"upstream-interface":["eth4"]}]}"#,
-            r#"{"listen-interface":[{"name":"eth1"}],"upstream-interface":[{"name":"eth0","address":["2001:db8::10"]}],
-                "vrf":[{"name":"red","listen-interface":[{"name":"eth1"},{"name":"eth5"}],"upstream-interface":[{"name":"eth4","address":["2001:db8:4::10"]}]}]}"#,
+            r#"{"listen-interface":["lo","eth1","eth3"],"server":["192.0.2.10"],"upstream-interface":["eth0"],
+                "vrf":[{"name":"red","listen-interface":["eth1","eth5"],"server":["192.0.2.20"],"upstream-interface":["eth4","eth2"]}]}"#,
+            r#"{"listen-interface":[{"name":"eth1"},{"name":"eth9"}],"upstream-interface":[{"name":"eth0","address":["2001:db8::10"]}],
+                "vrf":[{"name":"red","listen-interface":[{"name":"eth1"},{"name":"eth5"}],"upstream-interface":[{"name":"eth4","address":["2001:db8:4::10"]},{"name":"eth0","address":["2001:db8::10"]}]}]}"#,
         );
         let v4: Vec<(&str, &str)> = config
             .dhcp4
             .iter()
             .map(|b| (b.vrf.as_str(), b.interface.as_str()))
             .collect();
-        assert_eq!(v4, [("default", "eth1")]);
+        assert_eq!(v4, [("default", "eth1"), ("red", "eth5")]);
+        assert_eq!(config.dhcp4[1].upstream_interfaces, ["eth4"]);
         let v6: Vec<(&str, &str)> = config
             .dhcp6
             .iter()
             .map(|b| (b.vrf.as_str(), b.interface.as_str()))
             .collect();
         assert_eq!(v6, [("default", "eth1"), ("red", "eth5")]);
+        assert_eq!(config.dhcp6[1].servers.len(), 1);
         assert_eq!(
             warnings,
             [
                 "service dhcp-relay: listen-interface lo: the loopback interface is not supported; skipped",
-                "service dhcp-relay vrf red: listen-interface eth1 already relays for another instance; skipped",
-                "service dhcpv6-relay vrf red: listen-interface eth1 already relays for another instance; skipped",
+                "service dhcp-relay: listen-interface eth3 is in VRF red, not default; skipped",
+                "service dhcp-relay vrf red: listen-interface eth1 is in VRF default, not red; skipped",
+                "service dhcp-relay vrf red: upstream-interface eth2 is in VRF default, not red; skipped",
+                "service dhcpv6-relay: listen-interface eth9 does not exist; skipped",
+                "service dhcpv6-relay vrf red: upstream-interface eth0 is in VRF default, not red; skipped",
+                "service dhcpv6-relay vrf red: listen-interface eth1 is in VRF default, not red; skipped",
+            ]
+        );
+    }
+
+    /// `vrf default` is the global table: zebra-rs refuses it, and an
+    /// entry an older zebra-rs delivers is ignored, not taken for the
+    /// top-level instance.
+    #[test]
+    fn vrf_default_is_ignored() {
+        let (config, warnings) = render_str(
+            r#"{"listen-interface":["eth1"],"server":["192.0.2.10"],"upstream-interface":["eth0"],
+                "vrf":[{"name":"default","listen-interface":["eth2"],"server":["192.0.2.99"],"upstream-interface":["eth0"]}]}"#,
+            "{}",
+        );
+        assert_eq!(config.dhcp4.len(), 1);
+        assert_eq!(config.dhcp4[0].interface, "eth1");
+        assert_eq!(
+            warnings,
+            [
+                "service dhcp-relay vrf default: \"default\" is the global routing table, configured at the top level; ignored"
+            ]
+        );
+    }
+
+    /// An instance whose VRF does not exist is not started, with the
+    /// warning every backend gives.
+    #[test]
+    fn missing_vrf() {
+        let (config, warnings) = render_str(
+            r#"{"vrf":[{"name":"blue","listen-interface":["eth1"],"server":["192.0.2.20"],"upstream-interface":["eth0"]}]}"#,
+            r#"{"vrf":[{"name":"blue","listen-interface":[{"name":"eth1"}],"upstream-interface":[{"name":"eth0","address":["2001:db8::10"]}]}]}"#,
+        );
+        assert!(config.dhcp4.is_empty() && config.dhcp6.is_empty());
+        assert_eq!(
+            warnings,
+            [
+                "service dhcp-relay vrf blue: VRF blue does not exist; not started",
+                "service dhcpv6-relay vrf blue: VRF blue does not exist; not started",
             ]
         );
     }

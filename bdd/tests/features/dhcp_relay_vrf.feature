@@ -23,6 +23,10 @@ Feature: DHCPv4 and DHCPv6 relay in VRFs with overlapping tenants (service dhcp-
   2001:db8::/64 on both tenant server links, 2001:db8:9::/64 and
   2001:db8:99::/64 in the default VRF.
 
+  Every interface a `vrf <name>` instance names must be a member of that
+  VRF; insomnia skips any other with a warning (the agent checks again per
+  request), so a client of one VRF is never relayed to another's servers.
+
   r1 runs the agent, zebra-rs and insomnia (tests/scripts/dhcp_node.sh);
   every server runs kea-dhcp4 and kea-dhcp6 (tests/scripts/kea_server.sh).
   Requires the same host tools as dhcp_relay.feature.
@@ -102,6 +106,20 @@ Feature: DHCPv4 and DHCPv6 relay in VRFs with overlapping tenants (service dhcp-
     And ping from "r1" to "192.0.2.10" should fail
     And command "ip vrf exec red ping -c 1 -W 2 192.0.2.10" in namespace "r1" should eventually contain "1 received"
 
+  Scenario: An interface outside the instance's VRF is not relayed
+    Given the test topology exists
+    When I apply command "set service dhcpv6-relay vrf red listen-interface lan9" in namespace "r1"
+    Then insomnia log in namespace "r1" should eventually contain "service dhcpv6-relay vrf red: listen-interface lan9 is in VRF default, not red; skipped"
+    And DHCPv6 client on interface "c0" in namespace "c9" should obtain an address in "2001:db8:9::100-2001:db8:9::1ff"
+    And show command "show dhcpv6 relay vrf red statistics" in namespace "r1" should not contain "lan9"
+    When I apply command "delete service dhcpv6-relay vrf red listen-interface lan9" in namespace "r1"
+
+  Scenario: The relay statistics of one VRF
+    Given the test topology exists
+    Then show command "show dhcp relay vrf red statistics" in namespace "r1" should contain "red  lanred"
+    And show command "show dhcp relay vrf red statistics" in namespace "r1" should not contain "lanblue"
+    And show command "show dhcp relay vrf red statistics" in namespace "r1" should not contain "lan9"
+
   Scenario: A reply forged inside a tenant is dropped
     Given the test topology exists
     When I execute "python3 -I tests/scripts/dhcp_forge.py bootreply 10.1.0.1 10.1.0.1" in namespace "c1"
@@ -123,7 +141,8 @@ Feature: DHCPv4 and DHCPv6 relay in VRFs with overlapping tenants (service dhcp-
     And I apply command "delete interface wanblue vrf" in namespace "r1"
     And I apply command "delete vrf blue" in namespace "r1"
     Then command "ip -br link show type vrf" in namespace "r1" should eventually not contain "blue"
-    And log "relay" in namespace "r1" should eventually contain "server vrf blue: no interface blue; waiting for it"
+    And insomnia log in namespace "r1" should eventually contain "service dhcp-relay vrf blue: VRF blue does not exist; not started"
+    And insomnia log in namespace "r1" should eventually contain "service dhcpv6-relay vrf blue: VRF blue does not exist; not started"
     And DHCPv4 client on interface "c0" in namespace "c1" should obtain an address in "10.1.0.100-10.1.0.149"
     When I apply config "r1.conf" to namespace "r1"
     Then command "ip -br link show type vrf" in namespace "r1" should eventually contain "blue"

@@ -70,10 +70,49 @@ pub struct Snapshot {
 /// The VRF name of interfaces that are in no VRF.
 pub const DEFAULT_VRF: &str = "default";
 
+/// The warning for a `vrf default` entry: zebra-rs refuses the name at
+/// commit (it is the global table, configured at the top level), so
+/// only an older zebra-rs or a startup config delivers one, and it is
+/// ignored rather than taken for the global-table instance.
+pub fn reserved_vrf(scope: &str) -> String {
+    format!(
+        "{scope} vrf {DEFAULT_VRF}: \"{DEFAULT_VRF}\" is the global routing table, configured at the top level; ignored"
+    )
+}
+
+/// The one warning for an instance whose VRF does not exist, whichever
+/// backend renders it (`scope` is the instance's config path).
+pub fn missing_vrf(scope: &str, vrf: &str) -> String {
+    format!("{scope}: VRF {vrf} does not exist; not started")
+}
+
 impl Snapshot {
-    #[cfg(test)]
     pub fn link(&self, name: &str) -> Option<&Link> {
         self.links.values().find(|l| l.name == name)
+    }
+
+    /// Whether `vrf` exists: the global table always does, any other
+    /// VRF when its VRF device does.
+    pub fn has_vrf(&self, vrf: &str) -> bool {
+        vrf == DEFAULT_VRF
+            || self
+                .links
+                .values()
+                .any(|l| l.name == vrf && l.kind.as_deref() == Some("vrf"))
+    }
+
+    /// The one rule every per-VRF instance follows: an interface it
+    /// names must exist and be a member of its VRF (enslaved to the VRF
+    /// device, or to nothing for the global table). The error is the
+    /// end of a warning: "is in VRF default, not red" / "does not exist".
+    pub fn member(&self, vrf: &str, name: &str) -> Result<(), String> {
+        match self.link(name) {
+            None => Err("does not exist".to_string()),
+            Some(link) => match self.vrf_of(link) {
+                actual if actual == vrf => Ok(()),
+                actual => Err(format!("is in VRF {actual}, not {vrf}")),
+            },
+        }
     }
 
     /// The VRF `link` belongs to: its master when that is a VRF device,

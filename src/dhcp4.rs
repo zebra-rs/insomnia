@@ -233,9 +233,21 @@ pub fn instances(tree: &Server4Tree) -> Vec<(String, &Server4)> {
         .chain(
             tree.vrf
                 .iter()
-                .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.server))),
+                .filter_map(|v| v.name.as_ref().map(|n| (n.to_string(), &v.server)))
+                // The global table is the top level (`links::reserved_vrf`).
+                .filter(|(name, _)| name != crate::links::DEFAULT_VRF),
         )
         .collect()
+}
+
+/// Whether the tree has a `vrf default` entry, which [`instances`]
+/// leaves out.
+pub fn names_default_vrf(tree: &Server4Tree) -> bool {
+    tree.vrf.iter().any(|v| {
+        v.name
+            .as_ref()
+            .is_some_and(|n| n.to_string() == crate::links::DEFAULT_VRF)
+    })
 }
 
 // ---------------------------------------------------------------
@@ -467,6 +479,13 @@ pub fn slice_range(start: u32, stop: u32, exclude: &BTreeSet<u32>) -> Vec<(u32, 
 /// One instance → its Kea configuration.
 pub fn render(server: &Server4, ctx: &Context) -> Render {
     let scope = scope(ctx.vrf);
+    // A VRF that does not exist has no interfaces to serve: one warning,
+    // the same as every backend gives, and the idle render.
+    if !server.disable && !server.is_empty() && !ctx.links.has_vrf(ctx.vrf) {
+        let mut idle = render(&Server4::default(), ctx);
+        idle.warnings = vec![crate::links::missing_vrf(&scope, ctx.vrf)];
+        return idle;
+    }
     let mut warnings = Vec::new();
     let mut instance = Instance::default();
 
@@ -1388,6 +1407,24 @@ mod tests {
         let (mut l, a) = link(index, name, None, addrs);
         l.master = Some(master);
         (l, a)
+    }
+
+    /// An instance whose VRF does not exist: the idle render and the
+    /// one missing-VRF warning, not "no interface to listen on".
+    #[test]
+    fn missing_vrf() {
+        let links = snapshot(&[link(2, "lan1", None, &["10.1.0.1/24"])]);
+        let tree: Server4Tree = serde_json::from_str(
+            r#"{"shared-network-name": [{"name":"LAN","subnet": [{"prefix":"10.1.0.0/24","subnet-id":1,"range": [{"name":0,"start":"10.1.0.100","stop":"10.1.0.199"}]}]}]}"#,
+        )
+        .unwrap();
+        let r = render(&tree.default, &context("blue", &links));
+        assert!(!r.serving);
+        assert_eq!(
+            r.warnings,
+            ["service dhcp-server vrf blue: VRF blue does not exist; not started"]
+        );
+        assert!(!r.text.contains("shared-networks"));
     }
 
     /// `disable`, or nothing configured: the idle render, not serving.

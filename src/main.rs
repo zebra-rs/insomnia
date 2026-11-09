@@ -215,7 +215,12 @@ async fn main() {
         socket: args.dhcp_relay_socket,
         registry: Arc::clone(&registry),
     });
-    tokio::spawn(dhcp_relay::run(args.host.clone(), relayd, dhcp_show_rx));
+    tokio::spawn(dhcp_relay::run(
+        args.host.clone(),
+        relayd,
+        links.clone(),
+        dhcp_show_rx,
+    ));
     let kea = Arc::new(kea::Kea {
         dir: args.kea_dir,
         state_dir: args.kea_state_dir,

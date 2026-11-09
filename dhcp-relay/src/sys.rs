@@ -335,6 +335,16 @@ pub fn send_link(fd: RawFd, ifindex: u32, mac: [u8; 6], ip: &[u8]) -> io::Result
     sendto(fd, ip, &addr)
 }
 
+/// The name of `ifname`'s master device (its VRF or bridge), from
+/// `/sys/class/net/<ifname>/master`; `None` when it has none.
+pub fn master(ifname: &str) -> Option<String> {
+    if ifname.is_empty() || ifname.contains('/') || ifname.starts_with('.') {
+        return None;
+    }
+    let link = std::fs::read_link(format!("/sys/class/net/{ifname}/master")).ok()?;
+    link.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
 /// One getifaddrs(3) entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IfEntry {

@@ -11,8 +11,8 @@ candidate/running stores, commit); insomnia enforces it. It subscribes to the
 `service dhcp-relay` and `service dhcpv6-relay` running-config subtrees over gRPC,
 renders them into nftables, strongSwan (swanctl), keepalived, Kea and
 insomnia-dhcp-relay state, and registers as the show provider so `show firewall …`,
-`show vpn ipsec …`, `show vrrp …`, `show dhcp[v6] server …` and
-`show dhcp[v6] relay statistics` typed at the zebra-rs CLI are answered by this
+`show vpn ipsec …`, `show vrrp …`, `show dhcp[v6] server [vrf <name>] …` and
+`show dhcp[v6] relay [vrf <name>] statistics` typed at the zebra-rs CLI are answered by this
 process. The DHCP relay agent itself, `insomnia-dhcp-relay`, is a second binary in this
 workspace (`dhcp-relay/`, with the packet codec in `dhcp-packet/`); `kea-notify`
 (`src/bin/insomnia-kea-notify.rs`) is the tiny program Kea's run_script hook calls for
@@ -183,6 +183,12 @@ leaf inline. `serde_json` is built with `preserve_order` so show JSON keeps zebr
 order.
 
 ### Daemon instances (`src/process.rs`, `src/vrf.rs`)
+
+Every per-VRF instance follows `design/process.md` §4.9: an interface it names must be a
+member of its VRF (`links::Snapshot::member`; anything else is skipped with a warning),
+a missing VRF gets `links::missing_vrf`, a `vrf default` entry is ignored
+(`links::reserved_vrf`; zebra-rs refuses the name at commit), and show grammar is
+`show <feature> [vrf <name>] <view>`. A new per-VRF backend (`vrrp vrf`) must do the same.
 
 Every daemon instance goes through the registry: `process::reload` (keepalived, the
 relay agent) and `kea::Kea::apply` register it, honour an operator hold (`stop

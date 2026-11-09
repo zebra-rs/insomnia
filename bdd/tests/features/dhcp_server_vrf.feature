@@ -66,14 +66,14 @@ Feature: DHCP servers per VRF with overlapping tenants (service dhcp-server vrf,
 
   Scenario: Show is per VRF
     Given the test topology exists
-    Then show command "show dhcp server leases vrf red" in namespace "r1" should contain "10.1.0.100"
-    And show command "show dhcp server leases vrf red" in namespace "r1" should not contain "10.1.0.150"
-    And show command "show dhcp server leases vrf blue" in namespace "r1" should contain "10.1.0.150"
+    Then show command "show dhcp server vrf red leases" in namespace "r1" should contain "10.1.0.100"
+    And show command "show dhcp server vrf red leases" in namespace "r1" should not contain "10.1.0.150"
+    And show command "show dhcp server vrf blue leases" in namespace "r1" should contain "10.1.0.150"
     And show command "show dhcp server leases" in namespace "r1" should contain "10.9.0.100"
     And show command "show dhcp server leases" in namespace "r1" should not contain "10.1.0."
-    And show command "show dhcp server statistics vrf blue pool TENANT" in namespace "r1" should contain "TENANT  50    1       49         2%"
-    And show command "show dhcpv6 server leases vrf red" in namespace "r1" should contain "2001:db8:1::100"
-    And show command "show dhcp server leases vrf green" in namespace "r1" should contain "DHCP server is not configured for VRF green"
+    And show command "show dhcp server vrf blue statistics pool TENANT" in namespace "r1" should contain "TENANT  50    1       49         2%"
+    And show command "show dhcpv6 server vrf red leases" in namespace "r1" should contain "2001:db8:1::100"
+    And show command "show dhcp server vrf green leases" in namespace "r1" should contain "DHCP server is not configured for VRF green"
 
   Scenario: show process lists every instance, and the actions belong to the harness
     Given the test topology exists
