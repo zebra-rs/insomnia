@@ -18,6 +18,10 @@ IPv6 is the same picture: 2001:db8:1::/64 on both tenant LANs,
 2001:db8::/64 on both tenant server links, 2001:db8:9::/64 and
 2001:db8:99::/64 in the default VRF.
 
+Every interface a `vrf <name>` instance names must be a member of that
+VRF; insomnia skips any other with a warning (the agent checks again per
+request), so a client of one VRF is never relayed to another's servers.
+
 r1 runs the agent, zebra-rs and insomnia (tests/scripts/dhcp_node.sh);
 every server runs kea-dhcp4 and kea-dhcp6 (tests/scripts/kea_server.sh).
 Requires the same host tools as dhcp_relay.feature.
@@ -37,6 +41,8 @@ Requires the same host tools as dhcp_relay.feature.
 | Each tenant's client gets its lease from its own server | |
 | The counters are kept per VRF | |
 | The tenants' server-side routes live only in their VRF tables | |
+| An interface outside the instance's VRF is not relayed | |
+| The relay statistics of one VRF | |
 | A reply forged inside a tenant is dropped | |
 | Removing one tenant's relay leaves the other alone | |
 | A VRF that is deleted and re-created comes back | |
