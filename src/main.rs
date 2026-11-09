@@ -1,17 +1,18 @@
-//! insomnia — out-of-process firewall / IPsec / VRRP / DHCP relay
-//! enforcement daemon for zebra-rs.
+//! insomnia — out-of-process firewall / IPsec / VRRP / DHCP server and
+//! relay enforcement daemon for zebra-rs.
 //!
 //! zebra-rs owns the configuration (YANG schema, candidate/running
 //! stores, commit); insomnia enforces it: it subscribes to the
-//! `firewall`, `vpn ipsec`, `vrrp`, `service dhcp-relay` and
+//! `firewall`, `vpn ipsec`, `vrrp`, `service dhcp-server`,
+//! `service dhcpv6-server`, `service dhcp-relay` and
 //! `service dhcpv6-relay` running-config subtrees over the
 //! zebra.config.v1 gRPC API (one whole-subtree JSON batch per
 //! touching commit, snapshot first) and renders them into nftables,
-//! strongSwan (swanctl), keepalived and insomnia-dhcp-relay state. It
-//! also registers as the zebra.show.v1 show provider for those trees,
-//! so `show firewall`, `show vpn ipsec …`, `show vrrp …` and
-//! `show dhcp[v6] relay statistics` on the zebra-rs CLI are answered
-//! here.
+//! strongSwan (swanctl), keepalived, Kea and insomnia-dhcp-relay
+//! state. It also registers as the zebra.show.v1 show provider for
+//! those trees, so `show firewall`, `show vpn ipsec …`, `show vrrp …`,
+//! `show dhcp[v6] server …` and `show dhcp[v6] relay statistics` on
+//! the zebra-rs CLI are answered here.
 //!
 //! Every connection retries forever: zebra-rs restarting is a normal
 //! condition, and the subscription's snapshot-first contract makes
@@ -24,13 +25,19 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 mod api;
+mod dhcp4;
+mod dhcp6;
 mod dhcp_relay;
+mod dhcp_server;
 mod endpoint;
 mod firewall;
 mod ipsec;
 mod json;
+mod kea;
 mod keepalived;
+mod links;
 mod pb;
+mod pd_routes;
 mod process;
 mod provider;
 mod relayd;
@@ -96,6 +103,42 @@ struct Args {
     /// The relay agent's control socket (`show dhcp relay statistics`).
     #[arg(long, default_value = "/run/insomnia-dhcp-relay/control")]
     dhcp_relay_socket: PathBuf,
+    /// Directory holding one directory per Kea instance (`<vrf>/`): the
+    /// rendered kea-dhcp4.conf / kea-dhcp6.conf, the control sockets
+    /// and Kea's lock files.
+    #[arg(long, default_value = "/run/insomnia/kea")]
+    kea_dir: PathBuf,
+    /// Kea's state, one directory per VRF: the lease files and the
+    /// DHCPv6 server DUID.
+    #[arg(long, default_value = "/var/lib/insomnia/kea")]
+    kea_state_dir: PathBuf,
+    /// How Kea instances run: `systemd` starts and stops the template
+    /// units, `socket` only talks to instances somebody else started on
+    /// the instance's config file (containers, the BDD harness).
+    #[arg(long, value_enum, default_value_t = kea::Control::Systemd)]
+    kea_control: kea::Control,
+    /// systemd template unit for kea-dhcp4 instances; `@.` is replaced
+    /// by `@<vrf>.`.
+    #[arg(long, default_value = "insomnia-kea-dhcp4@.service")]
+    kea_unit4: String,
+    /// systemd template unit for kea-dhcp6 instances.
+    #[arg(long, default_value = "insomnia-kea-dhcp6@.service")]
+    kea_unit6: String,
+    /// Kea's hook libraries; default `/usr/lib/<multiarch>/kea/hooks`.
+    #[arg(long)]
+    kea_hooks_dir: Option<PathBuf>,
+    /// The program Kea's run_script hook calls for DHCPv6 lease events.
+    #[arg(long, default_value = "/usr/lib/insomnia/kea-notify")]
+    kea_notify: PathBuf,
+}
+
+/// Debian's multiarch hooks directory for this build's architecture.
+fn default_kea_hooks_dir() -> PathBuf {
+    let triplet = match std::env::consts::ARCH {
+        "arm" => "arm-linux-gnueabihf".to_string(),
+        arch => format!("{arch}-linux-gnu"),
+    };
+    PathBuf::from(format!("/usr/lib/{triplet}/kea/hooks"))
 }
 
 #[tokio::main]
@@ -112,6 +155,7 @@ async fn main() {
     let (ipsec_show_tx, ipsec_show_rx) = mpsc::channel(8);
     let (vrrp_show_tx, vrrp_show_rx) = mpsc::channel(8);
     let (dhcp_show_tx, dhcp_show_rx) = mpsc::channel(8);
+    let (dhcp_server_show_tx, dhcp_server_show_rx) = mpsc::channel(8);
 
     let ka = Arc::new(
         keepalived::Keepalived::new(
@@ -139,6 +183,22 @@ async fn main() {
         socket: args.dhcp_relay_socket,
     });
     tokio::spawn(dhcp_relay::run(args.host.clone(), relayd, dhcp_show_rx));
+    let links = links::spawn().await;
+    let kea = Arc::new(kea::Kea {
+        dir: args.kea_dir,
+        state_dir: args.kea_state_dir,
+        control: args.kea_control,
+        unit4: args.kea_unit4,
+        unit6: args.kea_unit6,
+        hooks_dir: args.kea_hooks_dir.unwrap_or_else(default_kea_hooks_dir),
+        notify: args.kea_notify,
+    });
+    tokio::spawn(dhcp_server::run(
+        args.host.clone(),
+        kea,
+        links,
+        dhcp_server_show_rx,
+    ));
 
     tracing::info!("insomnia started (zebra-rs at {})", args.host);
     provider::run(
@@ -148,6 +208,7 @@ async fn main() {
             ipsec: ipsec_show_tx,
             vrrp: vrrp_show_tx,
             dhcp: dhcp_show_tx,
+            dhcp_server: dhcp_server_show_tx,
         },
     )
     .await;

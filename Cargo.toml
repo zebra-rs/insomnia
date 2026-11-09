@@ -5,7 +5,7 @@ name = "insomnia"
 version = "0.2.0"
 edition = "2024"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
-description = "Out-of-process firewall / IPsec / VRRP enforcement daemon for zebra-rs"
+description = "Out-of-process firewall / IPsec / VRRP / DHCP enforcement daemon for zebra-rs"
 license = "AGPL-3.0-or-later"
 homepage = "https://zebra.rs"
 
@@ -70,9 +70,11 @@ depends = "$auto, nftables"
 # The IPsec backend renders /etc/swanctl/swanctl.conf and drives strongSwan
 # through `swanctl -q` and charon's VICI socket; the VRRP backend renders
 # keepalived.conf and drives keepalived through the insomnia-keepalived@
-# template unit. Recommends rather than Depends: each backend works fine
-# without the others' daemons installed.
-recommends = "strongswan-swanctl, charon-systemd, keepalived"
+# template unit; the DHCP server backend renders Kea's configurations and
+# drives kea-dhcp4 / kea-dhcp6 through the insomnia-kea-dhcp{4,6}@ template
+# units. Recommends rather than Depends: each backend works fine without the
+# others' daemons installed.
+recommends = "strongswan-swanctl, charon-systemd, keepalived, kea-dhcp4-server, kea-dhcp6-server"
 # The whole point of this daemon is enforcing zebra-rs's firewall/vpn config,
 # but it can run on a different host than zebra-rs (tcp://HOST:PORT), so the
 # zebra-rs package itself is only suggested.
@@ -84,21 +86,23 @@ revision = ""
 # packaging/changelog-gen.sh (the packaging Makefile runs it before cargo deb).
 changelog = "packaging/out/changelog"
 extended-description = """
-insomnia is the out-of-process firewall / IPsec / VRRP / DHCP relay
-enforcement daemon for zebra-rs. zebra-rs owns the configuration (YANG
+insomnia is the out-of-process firewall / IPsec / VRRP / DHCP server and
+relay enforcement daemon for zebra-rs. zebra-rs owns the configuration (YANG
 schema, candidate/running stores, commit); insomnia subscribes to the
-`firewall`, `vpn ipsec`, `vrrp` and `service dhcp-relay` /
-`service dhcpv6-relay` running-config subtrees over gRPC and renders them
-into nftables, strongSwan (swanctl), keepalived and insomnia-dhcp-relay
-state, and answers `show firewall` / `show vpn ipsec` / `show vrrp` /
-`show dhcp relay` on the zebra-rs CLI as the show provider for those trees.
+`firewall`, `vpn ipsec`, `vrrp` and `service dhcp-server` /
+`service dhcpv6-server` / `service dhcp-relay` / `service dhcpv6-relay`
+running-config subtrees over gRPC and renders them into nftables,
+strongSwan (swanctl), keepalived, Kea and insomnia-dhcp-relay state, and
+answers `show firewall` / `show vpn ipsec` / `show vrrp` / `show dhcp` on
+the zebra-rs CLI as the show provider for those trees.
 insomnia-dhcp-relay, its DHCPv4/DHCPv6 relay agent, ships in this package."""
 # Custom maintainer scripts; each carries a #DEBHELPER# token where cargo-deb
 # injects the generated systemd fragments.
 maintainer-scripts = "packaging/maintainer"
-# insomnia-keepalived@.service is the per-VRF keepalived template unit and
+# insomnia-keepalived@.service is the per-VRF keepalived template unit,
+# insomnia-kea-dhcp{4,6}@.service the per-VRF Kea template units, and
 # insomnia-dhcp-relay.service the relay agent's unit; insomnia starts,
-# reloads and stops both itself. They have no [Install] section and need no
+# reloads and stops them itself. They have no [Install] section and need no
 # maintainer-script fragments, so they ship as plain assets. As a second
 # systemd-units entry, `enable = false, start = false` replaced the
 # fragments generated for insomnia.service (cargo-deb 3.7.0), and a fresh
@@ -112,7 +116,12 @@ maintainer-scripts = "packaging/maintainer"
 assets = [
   ["target/release/insomnia", "usr/bin/", "755"],
   ["target/release/insomnia-dhcp-relay", "usr/bin/", "755"],
+  # Run by Kea's run_script hook for DHCPv6 lease events (delegated-prefix
+  # routes); insomnia links each instance's kea-notify to it.
+  ["target/release/insomnia-kea-notify", "usr/lib/insomnia/kea-notify", "755"],
   ["packaging/systemd/insomnia-keepalived@.service", "usr/lib/systemd/system/", "644"],
+  ["packaging/systemd/insomnia-kea-dhcp4@.service", "usr/lib/systemd/system/", "644"],
+  ["packaging/systemd/insomnia-kea-dhcp6@.service", "usr/lib/systemd/system/", "644"],
   ["packaging/systemd/insomnia-dhcp-relay.service", "usr/lib/systemd/system/", "644"],
 ]
 

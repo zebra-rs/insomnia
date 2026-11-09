@@ -4,7 +4,10 @@ Status: proposal, 2026-10-26. The relay is implemented (2026-11-08): the
 agent (§10, insomnia PR #19), the `service dhcp-relay` / `dhcpv6-relay` trees
 with their `vrf` lists, and the relay backend and statistics (zebra-rs branch
 `service-dhcp-relay`, insomnia branch `dhcp-relay-backend`). The server is
-not. This document settles open decision D9 in `design/vyos-gap.md`, which
+implemented (2026-11-09; zebra-rs branch `service-dhcp-server`, insomnia
+branch `dhcp-server`): work items 1–9 of §17 except the AppArmor profiles,
+with per-VRF instances in socket mode only until the VRF binding of
+`design/process.md` §4 exists. §22 records what the implementation changed. This document settles open decision D9 in `design/vyos-gap.md`, which
 ranks DHCP second among the missing insomnia-shaped features, after NAT.
 
 insomnia gains DHCP in two parts:
@@ -125,6 +128,7 @@ instead of storing something that is silently ignored:
 | `hostfile-update` | VyOS writes `/etc/hosts` from a `run_script` hook. It belongs with the system's own name service | DNS forwarding, `system static-host-mapping` |
 | `ping-check` (all levels) | `libdhcp_ping_check.so` is not in Ubuntu's 2.4.1 `kea-common` | a newer Kea |
 | `high-availability` | Must be mutually authenticated (§9), which needs `pki` | `pki` |
+| client-class `hostname substring` / `vendor-class-id substring` | VyOS renders a case-insensitive contains test with `match()` and `lcase()`; Kea 2.4.1 has neither ("Invalid character: m") | a newer Kea |
 | `dhcp-relay interface` | Deprecated in VyOS in favour of `listen-interface` + `upstream-interface` | — |
 
 `[ext]` marks a zebra-rs extension. There are none in the config tree. The
@@ -394,7 +398,8 @@ It differs from §7.2 in these rows:
 | `static-mapping` | `reservations[] { hostname, hw-address \| duid, ip-addresses, prefixes, option-data }` |
 | `sip-server` | `sip-server-addr` for addresses, `sip-server-dns` for names |
 | `time-zone` | `new-posix-timezone` + `new-tzdb-timezone` |
-| PD configured and no `disable-route-autoinstall` | `libdhcp_run_script.so` calling `/usr/lib/insomnia/kea-notify` (§7.5) |
+| PD configured and no `disable-route-autoinstall` | `libdhcp_run_script.so` calling `<kea-dir>/<vrf>/kea-notify`, a link to `/usr/lib/insomnia/kea-notify` (§7.5) |
+| subnet with no `interface`, in a shared network with none | `interface` set to the one interface of the VRF with an address in the subnet. **Deviation:** Kea 2.4 selects a subnet for a directly connected client only by `interface` and otherwise answers NoAddrsAvail; VyOS leaves that to the operator |
 
 Every option name in `kea6_options` passed `kea-dhcp6 -t`.
 
@@ -406,11 +411,14 @@ kernel route.
 
 insomnia instead:
 
-1. Points `run_script` at `/usr/lib/insomnia/kea-notify`, a tiny program that
-   copies `QUERY6_IFACE_NAME`, `QUERY6_REMOTE_ADDR` and the
-   `LEASES6_AT<i>_{TYPE,ADDRESS,PREFIX_LEN}` variables into one datagram. It
-   sends that to `<kea-dir>/<vrf>/events`, a socket that insomnia creates with
-   mode 0660, group `_kea`.
+1. Points `run_script` at `<kea-dir>/<vrf>/kea-notify`, a link insomnia
+   makes to `/usr/lib/insomnia/kea-notify`, a tiny program that copies the
+   hook point and Kea's `QUERY6_*`, `LEASE6_*`, `LEASES6_*` and
+   `DELETED_LEASES6_*` variables into one datagram. It sends that to the
+   `events` socket beside the link it was started as (argv[0]), which
+   insomnia creates with mode 0660, group `_kea`: `run_script` passes no
+   arguments and no environment of its own, so the link is how the program
+   knows its instance.
 2. Treats the datagram only as a claim. insomnia installs or replaces a route
    only after `lease6-get` confirms an active `IA_PD` lease for that exact
    prefix. So a forged datagram can at most re-point a route for a prefix that
@@ -479,6 +487,8 @@ The renderer turns each into skip-with-warning.
 | `--kea-state-dir` | `/var/lib/insomnia/kea` | `<vrf>/kea-leases{4,6}.csv`, kea-lfc's work files, the DHCPv6 server DUID |
 | `--kea-control` | `systemd` | `systemd` starts and stops the template units. `socket` only talks to a Kea that somebody else started, which is what BDD does |
 | `--kea-unit4`, `--kea-unit6` | `insomnia-kea-dhcp4@.service`, `insomnia-kea-dhcp6@.service` | template units; the instance name is the VRF (`default` for the global table) |
+| `--kea-hooks-dir` | `/usr/lib/<multiarch>/kea/hooks` | `lease_cmds`, `stat_cmds`, `run_script` |
+| `--kea-notify` | `/usr/lib/insomnia/kea-notify` | the program each instance's `kea-notify` link points to |
 
 Control-socket paths stay well under the 108-byte `AF_UNIX` limit even with a
 15-character VRF name. The limit was hit while testing from a long scratch
@@ -496,7 +506,9 @@ Per family, per VRF, after every config event and every relevant link or
 address change:
 
 1. **Render.** Nothing to serve (no tree, `disable`, nothing valid) →
-   `systemctl stop`, done.
+   `systemctl stop`, done. In socket mode there is nothing to stop, so the
+   instance is loaded with the idle render instead (no interfaces, no
+   networks), by the steps below.
 2. **Compare.** The render equals the last *loaded* text and the instance is
    running → nothing to do.
 3. **Running instance.** Send `config-test` with the JSON inline. On success,
@@ -561,6 +573,17 @@ SystemCallArchitectures=native
 - **Whether to install `apparmor` on the ISO** is a separate SBOM decision
   (§15). It would restore the mitigation Canonical's triage of the 2025 CVEs
   assumes.
+
+**As built (2026-11-09).** The units ship without `AppArmorProfile=`
+until the profiles exist (work item 7 is otherwise done). They were run as
+transient units with every `[Service]` sandbox line, `DynamicUser=` standing
+in for `_kea` (no Kea package on the test host), in a scratch network
+namespace: both instances served a real client (`CapEff` 0x2400), hooks
+loaded under `NoNewPrivileges` and `SystemCallFilter=@system-service`, the
+DHCPv6 `run_script` hook ran kea-notify and its datagram arrived, and the
+lease files were 0640. A VRF instance (`@red`) is not started under
+systemd yet: without the `BPFProgram=` binding it would run in the default
+VRF, so insomnia warns and leaves it stopped (§19).
 
 Packaging takes the lesson of PR #18: the template units are plain `assets`,
 not extra `systemd-units` entries. Under cargo-deb 3.7.0, a second entry with
@@ -856,7 +879,9 @@ In order within each track; each item is one PR.
 | 13 | insomnia | `dhcp-docs` | book chapters, AGENTS.md backend notes | S |
 | 14 | folksy-rs | `mkiso-kea` | disable the stock units, drop the dhcp6 edit | S |
 
-Server track: 1–2, 3, 4, 5, 6, 7, then 8–9. The relay track (10–11) can
+Server track: 1–2, 3, 4, 5, 6, 7, then 8–9. Status 2026-11-09: 1–9 built
+together (zebra-rs `service-dhcp-server`, insomnia `dhcp-server`), less the
+AppArmor profiles of item 7; 10–12 done with the relay. The relay track (10–11) can
 start once item 1 lands. Item 12 follows each track.
 
 ## 18. Spike, before item 4
@@ -947,3 +972,40 @@ once on an ISO build (no AppArmor):
   - `src/keepalived.rs` (process-control pattern), `src/provider.rs`;
   - `packaging/systemd/insomnia-keepalived@.service`;
   - `design/vrrp.md`, `design/vyos-gap.md`, `design/sbom.md`, [plans/fw-global-options](plans/fw-global-options.md).
+
+## 22. Implementation notes (server)
+
+What the implementation changed against §3–§19, and why:
+
+- **No `substring` client-class matches** (§3.3). Kea 2.4.1 refuses `match()`
+  and `lcase()`, so VyOS's case-insensitive contains test cannot be
+  rendered; a contains test built from `substring()` would be
+  case-sensitive and so not the same thing. The leaves stay out of the
+  schema. `value` matches are rendered as hex literals, so no text can
+  break out of the expression.
+- **The subnet `interface` is filled in for DHCPv6** (§7.4). Found by the
+  BDD suite: a directly connected client got NoAddrsAvail from a subnet
+  with no `interface`.
+- **kea-notify finds its socket through argv[0]** (§7.5): see the step 1
+  text. Releases are checked after a delay (1 s, then 5 s), because the
+  hook runs before Kea has finished the release; the 60 s sweep covers
+  anything later. A delegation range that is removed, or whose routes are
+  switched off (`disable-route-autoinstall`, nothing served), has its
+  routes removed at once.
+- **Kea's `lease-database` needs `kea-lfc`.** A persistent memfile refuses
+  to load when `/usr/sbin/kea-lfc` is missing, which matters only for Kea
+  run from an unpacked tree (the BDD harness sets `KEA_LFC_EXECUTABLE`).
+- **Show times are UTC** (`YYYY-MM-DD HH:MM:SS`); VyOS prints local time.
+  `show … leases|statistics|static-mappings` takes `vrf <name>` and
+  `pool <name>`; VyOS's `state`, `sort` and `origin` filters are not built.
+  A disabled or not-serving instance answers so instead of listing the
+  leases still in its file.
+- **Socket mode** (`--kea-control socket`) loads an idle configuration
+  where systemd mode stops the instance; the BDD harness starts each
+  instance on a bootstrap configuration at insomnia's paths.
+- **The listen set follows the kernel**: `crate::links` dumps links and
+  addresses after each burst of netlink events, and a render identical to
+  the last applied one is not applied again. When a commit adds the
+  interface addresses and the server together, insomnia sees the
+  configuration before the addresses and logs "no interface to listen on"
+  once, then loads the server on the address events that follow.

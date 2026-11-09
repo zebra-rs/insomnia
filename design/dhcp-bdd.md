@@ -1,8 +1,10 @@
 # DHCP server and relay BDD suite, with VRFs — design
 
-Status: phases R1 and R2 implemented, 2026-11-09 (`@dhcp_relay`,
-`@dhcpv6_relay`, `@dhcp_relay_vrf`; what changed on the way is in §10). The
-server phases wait for the Kea backend. This replaces the
+Status: implemented, 2026-11-09. Phases R1 and R2 (`@dhcp_relay`,
+`@dhcpv6_relay`, `@dhcp_relay_vrf`), then S1, S2, V1 and V2
+(`@dhcp_server`, `@dhcpv6_server`, `@dhcp_server_relay`,
+`@dhcp_server_vrf`, `@dhcp_vrf_e2e`) with the Kea backend the same day;
+what changed on the way is in §10. This replaces the
 BDD paragraph of `design/dhcp.md` §16 and expands work item 12 of
 `design/dhcp.md` §17 into one item per feature (§9).
 
@@ -379,15 +381,15 @@ Everything else reuses existing steps:
 |:--|:--|:--|:--|
 | R1 | `@dhcp_relay`, `@dhcpv6_relay` | the relay branches; §4 scripts and §5 steps | implemented |
 | R2 | `@dhcp_relay_vrf` | the same | implemented |
-| S1 | `@dhcp_server`, `@dhcpv6_server` | `design/dhcp.md` §17 items 1–9 (schema, Kea control, backends, show, PD routes) | after the server track |
-| S2 | `@dhcp_server_relay` | S1 | after S1 |
-| V1 | `@dhcp_server_vrf` | the server trees' `vrf` lists, per-VRF Kea, and `design/process.md` items 2 and 4 | after the process track |
-| V2 | `@dhcp_vrf_e2e` | V1 | after V1 |
+| S1 | `@dhcp_server`, `@dhcpv6_server` | `design/dhcp.md` §17 items 1–9 (schema, Kea control, backends, show, PD routes) | implemented |
+| S2 | `@dhcp_server_relay` | S1 | implemented |
+| V1 | `@dhcp_server_vrf` | the server trees' `vrf` lists, per-VRF Kea (socket mode; `show process` waits for `design/process.md` items 2 and 4) | implemented, without the `show process` scenario |
+| V2 | `@dhcp_vrf_e2e` | V1 | implemented |
 
 The scripts and steps of §4 and §5 land with phase R1. Each later phase adds
 only its feature, configs and docs page (`make -C bdd docs`).
 
-## 10. Implementation notes (R1, R2)
+## 10. Implementation notes
 
 What the implementation changed against §3–§6, and why:
 
@@ -431,4 +433,50 @@ What the implementation changed against §3–§6, and why:
 - **The agent** now logs a successful upward DHCPv6 relay at debug level,
   as it already did for DHCPv4; without it, a lost packet could not be
   placed between the agent and the server.
-
+- **Router Kea (S1).** `dhcp_node.sh NS kea` starts kea-dhcp4 and kea-dhcp6
+  on a bootstrap configuration at the paths insomnia renders to, before
+  insomnia (`--kea-control socket`, leases under `/run/insomnia/kea-state`
+  inside the node's private `/run`). `stop-insomnia` / `start-insomnia`
+  re-enter the node's mount namespace with `nsenter --wd`, because
+  `nsenter -m` otherwise starts in `/`.
+- **Requested options.** Kea sends only the options a client asks for, so
+  the S1 lease assertions run dhcpcd with `option …` lines (`option
+  ntp_servers`, `option tzdb_timezone`, `option dhcp6_name_servers`, …).
+- **§3.4.** c1's MAC address is pinned for the static mapping; scenario 3's
+  "second client on lan1" is c1 with another MAC address (a new client-id
+  and chaddr), which gets `10.1.0.101`. The option 121 check is the
+  `classless_static_routes` lease variable (`198.51.100.0/24 10.1.0.1
+  0.0.0.0/0 10.1.0.1`), not a kernel route: dhcpcd's one-shot run does
+  not keep its routes. The reload scenario proves the reload with a new
+  option (`time-zone` → `tzdb_timezone`) on a renewed lease. The skip
+  scenario adds a range outside its subnet (a separate config file: `start`
+  and `stop` are mandatory, so one `vtyctl apply -c` line cannot carry
+  them). The listen-set check is the absence of a packet socket on lan3.
+- **§3.5.** The static mapping and the range use c1's DUID-LL, changed by
+  changing its MAC address. "Release removes the route" became "the route
+  goes when the lease expires": the PD subnet has a 20-second lease, and
+  Kea's reclaim timer runs the `lease6_expire` hook; releasing would need
+  a long-running dhcpcd per client. The new step `DHCPv6 client … should
+  obtain a prefix in …` reads dhcpcd's `dhcp6_ia_pd1_prefix1` variables.
+- **Found by the suite:** Kea 2.4 answers NoAddrsAvail to a directly
+  connected DHCPv6 client unless the subnet has an `interface`, so the
+  renderer now fills it in (`design/dhcp.md` §7.4).
+- **§3.6 (S2).** A shared network is one link to Kea: giaddr or
+  link-address picks the network, then any of its subnets may serve. The
+  DHCPv4 side keeps the planned single network (its 10.1.0.0/24 has only
+  the class range, so a client without circuit-id `lan1` can only get
+  10.2.0.0/24); the DHCPv6 subnets get a network each. Kea 2.4 receives
+  DHCPv6 on each interface's link-local and ff02::1:2 sockets, and VyOS's
+  `listen-interface` cannot name a unicast address, so the relay sends to
+  ff02::1:2 on the server link.
+- **§3.7 (V1).** The `show process` scenario waits for
+  `design/process.md` (items 2 and 4). VRF instances start after zebra-rs
+  has created the VRFs (`dhcp_node.sh … kea-vrf <vrf>`, under
+  `ip vrf exec`); insomnia retries an instance that no Kea answers every
+  5 s, and the script starts Kea on a configuration insomnia already
+  rendered rather than overwriting it. "Removing one tenant" deletes
+  `service dhcp-server vrf blue`: blue's instance is loaded idle.
+- **§3.8 (V2).** r2 serves both tenants with `listen-address 192.0.2.2` in
+  each VRF: two UDP sockets on the same address and port, each bound to
+  its VRF by `ip vrf exec`. The return routes to the tenants' LAN are
+  kernel routes added per VRF with `ip route add … vrf <name>`.
