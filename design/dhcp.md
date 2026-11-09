@@ -622,7 +622,7 @@ not extra `systemd-units` entries. Under cargo-deb 3.7.0, a second entry with
 ### 10.1 Process
 
 - **Code.** Two new workspace crates:
-  - `dhcp-packet/`: the codec, with no I/O. It covers the DHCPv4 header and options, and DHCPv6 client and relay messages and options. It has property tests and `cargo fuzz` targets.
+  - `dhcp-packet/`: the codec, with no I/O. It covers the DHCPv4 header and options, and DHCPv6 client and relay messages and options. It has deterministic property tests (`parse_is_total`); the `cargo fuzz` targets planned here were never written. It now lives in zebra-rs (`crates/dhcp-packet`, shared with zebra-rs's DHCP client) and is vendored here unchanged.
   - `dhcp-relay/`: the binary `insomnia-dhcp-relay`.
 - **One process** for both families and every VRF. It binds per-interface and
   per-VRF sockets itself, so it needs no preload shim.
