@@ -15,17 +15,18 @@
 //! answers `stats` with its counters as JSON.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::process::{self, Applied, Control};
+use crate::process::{self, Applied, Control, Managed, Registry};
 
 /// How long a statistics query may take.
 const STATS_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Relayd {
     /// Holds `relay.json`, and `relay.pid` in signal mode.
     pub dir: PathBuf,
@@ -33,7 +34,11 @@ pub struct Relayd {
     pub unit: String,
     /// The agent's control socket.
     pub socket: PathBuf,
+    pub registry: Arc<Registry>,
 }
+
+/// The agent's name in `show process`: one process for every VRF.
+pub const PROCESS_NAME: &str = "dhcp-relay";
 
 impl Relayd {
     pub fn conf(&self) -> PathBuf {
@@ -53,7 +58,16 @@ impl Relayd {
         // No secrets, and the agent runs as an unprivileged dynamic
         // user: world-readable.
         let changed = process::write_if_changed(&self.conf(), conf, 0o644).await?;
-        process::reload(self.control, &self.unit, &self.pid(), changed, empty).await
+        let pid = self.pid();
+        let managed = Managed {
+            name: PROCESS_NAME,
+            // It binds its own sockets in every VRF: no VRF binding.
+            vrf: None,
+            control: self.control,
+            unit: &self.unit,
+            pid_file: &pid,
+        };
+        process::reload(&self.registry, &managed, changed, empty).await
     }
 
     /// The agent's counters: `{"dhcp4": [rows], "dhcp6": [rows]}`.
@@ -95,6 +109,11 @@ mod tests {
             control: Control::Signal,
             unit: "insomnia-dhcp-relay.service".to_string(),
             socket: dir.join("control"),
+            registry: {
+                let (_tx, rx) =
+                    tokio::sync::watch::channel(Arc::new(crate::links::Snapshot::default()));
+                Arc::new(Registry::new(dir.join("holds"), None, rx))
+            },
         }
     }
 

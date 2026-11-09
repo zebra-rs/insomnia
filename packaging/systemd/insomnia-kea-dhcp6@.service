@@ -8,9 +8,20 @@ Description=Kea DHCPv6 server for VRF %i, driven by insomnia
 # enabled on its own.
 After=network-online.target insomnia.service
 Wants=network-online.target
+# The instance runs in VRF %i: systemd attaches the socket program insomnia
+# pins for that VRF (BPFProgram= below; design/process.md §4), which binds
+# every IPv4/IPv6 socket Kea creates to the VRF device. Raw (AF_PACKET)
+# sockets are per interface and need nothing; CAP_NET_RAW also lets Kea
+# bind a socket to a member interface over the VRF binding. `default` gets
+# a program that leaves sockets unbound. insomnia pins the program before
+# it starts the instance; without this line a missing program would run
+# Kea in the default VRF. It must be in [Unit]: systemd ignores it in
+# [Service].
+AssertPathExists=/sys/fs/bpf/insomnia/vrf/%i
 
 [Service]
 Type=simple
+BPFProgram=sock_create:/sys/fs/bpf/insomnia/vrf/%i
 User=_kea
 Group=_kea
 # Kea's lock and pid files beside the configuration and control socket, in

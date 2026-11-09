@@ -35,7 +35,7 @@ use crate::api::ShowRequest;
 use crate::dhcp4::{self, Server4Tree};
 use crate::dhcp6::{self, Server6Tree};
 use crate::json::Flex;
-use crate::kea::{self, Applied, Family, Kea};
+use crate::kea::{Applied, Family, Kea};
 use crate::links::{DEFAULT_VRF, Snapshot};
 use crate::pd_routes::{self, Ranges};
 use crate::text::table;
@@ -434,8 +434,7 @@ fn render_family(
                 return out;
             };
             for (vrf, server) in dhcp4::instances(tree) {
-                let mut render = dhcp4::render(server, &context(kea, family, &vrf, snapshot));
-                vrf_gate(kea, family, &vrf, &mut render);
+                let render = dhcp4::render(server, &context(kea, family, &vrf, snapshot));
                 out.push((vrf, render));
             }
         }
@@ -444,28 +443,12 @@ fn render_family(
                 return out;
             };
             for (vrf, server) in dhcp6::instances(tree) {
-                let mut render = dhcp6::render(server, &context(kea, family, &vrf, snapshot));
-                vrf_gate(kea, family, &vrf, &mut render);
+                let render = dhcp6::render(server, &context(kea, family, &vrf, snapshot));
                 out.push((vrf, render));
             }
         }
     }
     out
-}
-
-/// A VRF instance under systemd needs the unit's VRF binding
-/// (`BPFProgram=`, design/process.md §4), which is not built yet:
-/// without it Kea would run in the default VRF. Until then such an
-/// instance is not started. In socket mode whoever starts Kea binds it
-/// (the BDD harness uses `ip vrf exec`).
-fn vrf_gate(kea: &Kea, family: Family, vrf: &str, render: &mut Render) {
-    if vrf != DEFAULT_VRF && kea.control == kea::Control::Systemd && render.serving {
-        render.serving = false;
-        render.warnings.push(format!(
-            "service {} vrf {vrf}: per-VRF Kea under systemd needs the VRF binding of design/process.md §4; not started",
-            family.tree()
-        ));
-    }
 }
 
 fn instance_name(family: Family, vrf: &str) -> String {
@@ -568,6 +551,9 @@ async fn apply(
                         render.instance.subnets.len()
                     ),
                     Applied::Unchanged => tracing::info!("{name}: configuration unchanged"),
+                    Applied::Held => tracing::info!(
+                        "{name}: stopped by an operator (stop process); configuration written, not loaded"
+                    ),
                     Applied::Stopped => tracing::info!("{name}: stopped (nothing to serve)"),
                     Applied::NotRunning if !inst.pending => tracing::warn!(
                         "{name}: not running; configuration written to {}, retrying",

@@ -32,6 +32,7 @@ control socket (`--kea-control socket`).
 | Setup the router, its VRFs and the three Kea pairs | |
 | Each tenant's client gets its lease from its own instance | |
 | Show is per VRF | |
+| show process lists every instance, and the actions belong to the harness | |
 | A delegated prefix is routed in its VRF's table only | |
 | Removing one tenant's server leaves the other alone | |
 | Teardown topology | |

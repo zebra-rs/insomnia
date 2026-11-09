@@ -51,7 +51,10 @@ control sockets and the `kea-notify` link; `--kea-state-dir` (default
 `/var/lib/insomnia/kea`) the leases; `--kea-control systemd|socket` picks between the
 `insomnia-kea-dhcp{4,6}@<vrf>.service` template units and talking only to instances
 somebody else started (the BDD harness); `--kea-hooks-dir` defaults to
-`/usr/lib/<multiarch>/kea/hooks`.
+`/usr/lib/<multiarch>/kea/hooks`. Per-VRF template units are bound to their VRF by a
+cgroup-BPF program insomnia pins at `--vrf-bpf-dir/<vrf>` (default
+`/sys/fs/bpf/insomnia/vrf`) before it starts them (`src/vrf.rs`); `stop process`
+holds live in `--holds-dir` (default `/run/insomnia/holds`).
 
 ### BDD integration tests (`bdd/`)
 
@@ -113,12 +116,18 @@ Six long-lived tokio tasks share one `--host`, plus the kernel link watcher:
   subscribes to both server subtrees and also re-renders on link and address changes).
 - `links::spawn` — a NETLINK_ROUTE watcher (links, addresses, VRF masters, the tentative
   flag) publishing a fresh `links::Snapshot` on a `watch` channel after each burst of
-  kernel events; Kea's listen set is derived from it.
+  kernel events; Kea's listen set is derived from it, and `vrf::run` re-pins or unpins
+  VRF socket programs when a VRF is re-created or deleted (systemd mode only).
+- `process::serve` — `show process` and `start|stop|restart process` against the
+  `process::Registry`, where every backend registers its daemon instances
+  (`keepalived@<vrf>`, `kea-dhcp4@<vrf>`, `dhcp-relay`) as it applies them.
 - `provider::run` — registers the `firewall`, `ipsec`, `vrrp` and `dhcp` show trees with
   zebra-rs and routes each `ShowOrder` by path prefix (`/show/firewall` → firewall,
   `/show/vpn/ipsec` → ipsec, `/show/vrrp` → vrrp, `/show/dhcp[v6]/server` →
-  dhcp_server, the rest of `/show/dhcp` and `/show/dhcpv6` → dhcp_relay) over an mpsc
-  channel carrying `api::ShowRequest`. Each request holds a
+  dhcp_server, the rest of `/show/dhcp` and `/show/dhcpv6` → dhcp_relay,
+  `/show|start|stop|restart/process` → the process registry) over an mpsc channel
+  carrying `api::ShowRequest`. zebra-rs routes `start|stop|restart process` lines to
+  the `process` provider the way it routes `show` lines. Each request holds a
   oneshot; every order must be answered exactly once, and a dropped oneshot is turned into
   an error chunk so the CLI never hangs.
 
@@ -173,6 +182,18 @@ use `de_flex_vec` (tolerates a bare scalar). YANG lists are arrays of objects wi
 leaf inline. `serde_json` is built with `preserve_order` so show JSON keeps zebra-rs's key
 order.
 
+### Daemon instances (`src/process.rs`, `src/vrf.rs`)
+
+Every daemon instance goes through the registry: `process::reload` (keepalived, the
+relay agent) and `kea::Kea::apply` register it, honour an operator hold (`stop
+process`: the file is still written, the unit stays stopped, also across an insomnia
+restart), and call `Registry::bind(vrf)` before a per-VRF unit starts, which pins the
+VRF's socket program (`vrf::Pins`). The template units carry
+`AssertPathExists=/sys/fs/bpf/insomnia/vrf/%i` in `[Unit]` (a unit test checks the
+section: systemd ignores it in `[Service]` and would run the daemon unbound) and
+`BPFProgram=sock_create:` on the same path. In signal/socket mode the harness owns the
+processes: `show process` reads pid files and the actions are refused.
+
 ### Show commands
 
 Firewall show answers from the last committed model plus live counters fetched from
@@ -222,6 +243,12 @@ commit.
 - VRRP routers run via `bdd/tests/scripts/vrrp_node.sh` the same way: private `/run`, a
   keepalived started on an empty config, insomnia in signal mode. This keeps the routers
   clear of a keepalived service the development host itself may be running.
+- The systemd side (VRF pins, template units, holds) is not BDD: `sudo
+  bdd/tests/scripts/vrf_units.sh bdd/.stage <unpacked-kea>` runs zebra-rs and insomnia
+  in a scratch namespace in systemd mode against the host's systemd, with the shipped
+  Kea template in `/run/systemd/system`, and removes everything afterwards. Start
+  insomnia there with `nsenter --net`, not `ip netns exec`, which remounts `/sys` and
+  hides the bpffs.
 - DHCP routers run via `bdd/tests/scripts/dhcp_node.sh` the same way: the relay agent
   started on no config (`--pid-file`), zebra-rs, insomnia in signal mode
   (`--kea-control socket`). `dhcp_node.sh NS kea` also starts the default VRF's

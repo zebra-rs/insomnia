@@ -75,6 +75,16 @@ Feature: DHCP servers per VRF with overlapping tenants (service dhcp-server vrf,
     And show command "show dhcpv6 server leases vrf red" in namespace "r1" should contain "2001:db8:1::100"
     And show command "show dhcp server leases vrf green" in namespace "r1" should contain "DHCP server is not configured for VRF green"
 
+  Scenario: show process lists every instance, and the actions belong to the harness
+    Given the test topology exists
+    Then show command "show process kea-dhcp4@red" in namespace "r1" should contain "kea-dhcp4@red  red  running  up"
+    And show command "show process kea-dhcp6@blue" in namespace "r1" should contain "kea-dhcp6@blue  blue  running  up"
+    And show command "show process kea-dhcp4@default" in namespace "r1" should contain "kea-dhcp4@default  default  running  up"
+    And show command "show process" in namespace "r1" should contain "dhcp-relay"
+    And show command "show process" in namespace "r1" should contain "keepalived@default"
+    And show command "stop process kea-dhcp4@red" in namespace "r1" should contain "Not supported in signal mode"
+    And show command "show process kea-dhcp4@green" in namespace "r1" should contain "No process"
+
   Scenario: A delegated prefix is routed in its VRF's table only
     Given the test topology exists
     Then DHCPv6 client on interface "c0" in namespace "c1" should obtain a prefix in "2001:db8:8000::/48"

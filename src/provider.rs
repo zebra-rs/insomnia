@@ -1,6 +1,6 @@
 //! Show-provider client (`zebra.show.v1`).
 //!
-//! Registers the `firewall`, `ipsec`, `vrrp` and `dhcp` show trees with
+//! Registers the `firewall`, `ipsec`, `vrrp`, `dhcp` and `process` show trees with
 //! zebra-rs and pumps its orders to the backend tasks: `show firewall …`
 //! typed at the zebra-rs CLI is answered from this process.
 //! Re-registers with backoff whenever the stream drops (zebra-rs
@@ -23,12 +23,19 @@ pub struct Backends {
     pub dhcp: mpsc::Sender<ShowRequest>,
     /// `show dhcp server …` and `show dhcpv6 server …` (the Kea backend).
     pub dhcp_server: mpsc::Sender<ShowRequest>,
+    /// `show process` and `start|stop|restart process` (the registry).
+    pub process: mpsc::Sender<ShowRequest>,
 }
 
 impl Backends {
     /// The backend serving `path`, by its prefix.
     fn route(&self, path: &str) -> Option<&mpsc::Sender<ShowRequest>> {
-        if path.starts_with("/show/firewall") {
+        if matches!(
+            path,
+            "/show/process" | "/start/process" | "/stop/process" | "/restart/process"
+        ) {
+            Some(&self.process)
+        } else if path.starts_with("/show/firewall") {
             Some(&self.firewall)
         } else if path.starts_with("/show/vpn/ipsec") {
             Some(&self.ipsec)
@@ -53,6 +60,7 @@ fn register_message() -> ProviderMessage {
                 "ipsec".to_string(),
                 "vrrp".to_string(),
                 "dhcp".to_string(),
+                "process".to_string(),
             ],
         })),
     }
@@ -85,7 +93,7 @@ pub async fn run(host: String, backends: Backends) {
                 continue;
             }
         };
-        tracing::info!("show provider registered (firewall, ipsec, vrrp, dhcp)");
+        tracing::info!("show provider registered (firewall, ipsec, vrrp, dhcp, process)");
 
         loop {
             match orders.message().await {

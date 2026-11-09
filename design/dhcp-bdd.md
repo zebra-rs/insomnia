@@ -383,7 +383,7 @@ Everything else reuses existing steps:
 | R2 | `@dhcp_relay_vrf` | the same | implemented |
 | S1 | `@dhcp_server`, `@dhcpv6_server` | `design/dhcp.md` §17 items 1–9 (schema, Kea control, backends, show, PD routes) | implemented |
 | S2 | `@dhcp_server_relay` | S1 | implemented |
-| V1 | `@dhcp_server_vrf` | the server trees' `vrf` lists, per-VRF Kea (socket mode; `show process` waits for `design/process.md` items 2 and 4) | implemented, without the `show process` scenario |
+| V1 | `@dhcp_server_vrf` | the server trees' `vrf` lists, per-VRF Kea, `show process` (`design/process.md`) | implemented |
 | V2 | `@dhcp_vrf_e2e` | V1 | implemented |
 
 The scripts and steps of §4 and §5 land with phase R1. Each later phase adds
@@ -469,8 +469,11 @@ What the implementation changed against §3–§6, and why:
   DHCPv6 on each interface's link-local and ff02::1:2 sockets, and VyOS's
   `listen-interface` cannot name a unicast address, so the relay sends to
   ff02::1:2 on the server link.
-- **§3.7 (V1).** The `show process` scenario waits for
-  `design/process.md` (items 2 and 4). VRF instances start after zebra-rs
+- **§3.7 (V1).** `show process` runs in signal mode: the rows come from
+  the instances' pid files (Kea's own, in the instance directory), and
+  `stop process` is refused because the harness owns the processes. The
+  systemd side (pins, units, holds) is `vrf_units.sh`
+  (`design/process.md` §10). VRF instances start after zebra-rs
   has created the VRFs (`dhcp_node.sh … kea-vrf <vrf>`, under
   `ip vrf exec`); insomnia retries an instance that no Kea answers every
   5 s, and the script starts Kea on a configuration insomnia already

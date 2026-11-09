@@ -1,6 +1,8 @@
 # Process management and daemons in a VRF — design
 
-Status: proposal, 2026-11-08. Nothing here is implemented. §4 replaces the
+Status: implemented, 2026-11-09 (zebra-rs branch `process-cli`, insomnia
+branch `process-vrf`): work items 1–4 of §11; item 5 (`vrrp vrf <name>`)
+remains. §14 records what the implementation changed. §4 replaces the
 `LD_PRELOAD` shim of `design/vrrp.md` §13 and the VRF-binding options of
 `design/dhcp.md` §19.
 
@@ -352,6 +354,10 @@ In order; each item is one PR.
 
 Kea instances per VRF follow `design/dhcp.md`, using item 4.
 
+Status 2026-11-09: items 1, 2 and 4 built together (with Kea per VRF on top
+of 4); item 3 came with the DHCP server (`design/dhcp.md` §17 item 3);
+item 5 remains.
+
 ## 12. Open questions
 
 - **cradle in `show process`.** zebra-rs would merge its engine's row with insomnia's answer. Not in v1: cradle is in the other daemon, and `show ebpf` already reports it.
@@ -365,3 +371,48 @@ Kea instances per VRF follow `design/dhcp.md`, using item 4.
 - iproute2 `ip/ipvrf.c`, `prog_load()`: the five-instruction program.
 - openconfigd: `vendor/github.com/coreswitch/process/process.go`, `config/process_extensions/process.go`, `config/command.go`, `config/relay.go`, `config/vrrp.go`, `config/dhcp.go`.
 - zebra-rs: `zebra-rs/src/cradle/supervisor.rs`.
+
+## 14. Implementation notes
+
+What the implementation changed against §4–§10, and why:
+
+- **The program** is the five instructions of §4.2. iproute2's has a sixth,
+  `r2 = offsetof(bound_dev_if)`, that nothing reads. `src/vrf.rs` builds it,
+  loads it with `bpf(BPF_PROG_LOAD)` and pins it with `bpf(BPF_OBJ_PIN)`; a
+  failed load reports the verifier's log.
+- **Who pins.** `Registry::bind(vrf)` pins (or re-pins, when the recorded
+  interface index differs) right before a per-VRF unit starts: in
+  `process::reload` for keepalived, in `Kea::apply` for Kea, and in `start
+  process` / `restart process`. `vrf::run` reconciles the pins with the
+  kernel's VRFs at startup and on every link change: a deleted VRF has its
+  units stopped and its pin removed; a VRF re-created under a new index is
+  re-pinned and its running units `try-restart`ed. In practice a deleted
+  VRF also makes Kea's render serve nothing (no member interfaces), so the
+  backend stops the instance too, and starts it again on the re-created
+  VRF through `bind`; both paths end with the instance bound to the new
+  device.
+- **Registration.** Backends register an instance when they apply it, so
+  `show process` lists what insomnia has rendered: the relay agent and
+  keepalived@default always, Kea instances once they have served (an
+  instance that never had a configuration is never started and not
+  listed). The Admin column is `up` (the configuration wants it), `held`
+  (`stop process`) or `down` (nothing configured).
+- **Signal mode.** Kea's pid file is its own (`<kea-dir>/<vrf>/
+  kea-dhcp4.kea-dhcp4.pid`, from `KEA_PIDFILE_DIR`); keepalived's and the
+  relay agent's are the ones the harness names.
+- **zebra-rs** routes a line whose *first* word is `start`, `stop` or
+  `restart` like a show order, so config leaves of those names (a DHCP
+  range's `start` / `stop`) are unaffected; `is_process` is the first entry
+  of `SHOW_PROTOS`, because a process name is a free-form key that could
+  spell another protocol's node.
+- **The root-only script** (`bdd/tests/scripts/vrf_units.sh`) runs zebra-rs
+  and insomnia in systemd mode in a scratch namespace, with the shipped Kea
+  template installed in `/run/systemd/system` and a drop-in that only
+  supplies Kea's binary, root for the absent `_kea`, and the namespace. Its
+  28 checks cover §4.3 rows 2, 4 and 8 with the shipped template (Kea's UDP
+  socket bound to `red`, a lease to a client in `red`, the start refused
+  without a pin, `AssertResult=no`), the §6.2 table (stop holds across a
+  commit, restart refused while held, start on the configuration committed
+  meanwhile), and a VRF deleted and re-created (new index, re-pinned,
+  serving). insomnia is started there with `nsenter --net`: `ip netns exec`
+  remounts `/sys`, which hides the host's bpffs.
