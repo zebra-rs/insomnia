@@ -1,11 +1,13 @@
 # Appendix A: Supported RFCs and Internet-Drafts
 
-insomnia does not implement protocols itself. It renders configuration
-for the components that do: the Linux kernel (nftables, and XFRM for
-IPsec data), strongSwan's charon (IKE) and keepalived (VRRP). This
+With one exception, insomnia does not implement protocols itself. It
+renders configuration for the components that do: the Linux kernel
+(nftables, and XFRM for IPsec data), strongSwan's charon (IKE),
+keepalived (VRRP) and Kea (the DHCP servers). The exception is the DHCP
+relay agent, `insomnia-dhcp-relay`, which is insomnia's own. This
 appendix lists the IETF standards whose features you can reach from the
-`firewall`, `vpn ipsec` and `vrrp` configuration trees, grouped by
-area. Each entry gives a one-line summary and the configuration leaves
+`firewall`, `vpn ipsec`, `vrrp` and `service dhcp…` configuration
+trees, grouped by area. Each entry gives a one-line summary and the configuration leaves
 that select it.
 
 A standard the underlying daemon supports but the configuration tree
@@ -24,6 +26,42 @@ applied are listed separately at the end.
 
 Unicast VRRP (`peer-address`, `hello-source-address`) is a keepalived
 extension with no IETF specification.
+
+## DHCP
+
+The servers are Kea's implementation; the relay is insomnia's. Option
+numbers are given in parentheses.
+
+### DHCPv4
+
+| RFC / Internet-Draft | Description |
+| --- | --- |
+| RFC 2131 | Dynamic Host Configuration Protocol — `service dhcp-server`: `shared-network-name`, `subnet`, `range`, `lease` and `static-mapping`. `authoritative` answers a request for an unknown address with a DHCPNAK; `option bootfile-server` sets the next-server address. |
+| RFC 2132 | DHCP Options and BOOTP Vendor Extensions — the `option` leaves `client-prefix-length` (1), `time-offset` (2), `default-router` (3), `time-server` (4), `name-server` (6), `bootfile-size` (13), `domain-name` (15), `ip-forwarding` (19), `interface-mtu` (26), `ntp-server` (42), `wins-server` (44), `server-identifier` (54), `tftp-server-name` (66), `bootfile-name` (67), `smtp-server` (69) and `pop-server` (70); `vendor-option` in the vendor-specific information option (43); the client-class matches `hostname` (12) and `vendor-class-id` (60). |
+| RFC 1542 | Clarifications and Extensions for the Bootstrap Protocol — relay agent behaviour: `service dhcp-relay`, with the gateway address taken from the listen interface and `relay-options hop-count`. |
+| RFC 3046 | DHCP Relay Agent Information Option (82) — added by the relay with the listen interface's name as the circuit ID; `relay-options relay-agents-packets` for a request that already carries one; matched on the server by `client-class … relay-agent-information circuit-id` / `remote-id`. |
+| RFC 3397 | Domain Search Option (119) — `option domain-search`. |
+| RFC 3442 | Classless Static Route Option (121) — `option static-route`, with the default router added as the RFC requires of a server that sends both. |
+| RFC 4361 | Node-specific Client Identifiers for DHCPv4 — `static-mapping … duid` on the DHCPv4 server. |
+| RFC 4833 | Timezone Options for DHCP — `option time-zone`, sent as the POSIX string and the TZ database name (100, 101; DHCPv6 41, 42). |
+| RFC 5417 | CAPWAP Access Controller DHCP Option — `option capwap-controller` (138; DHCPv6 52). |
+| RFC 8910 | Captive-Portal Identification in DHCP and Router Advertisements — `option captive-portal` (114; DHCPv6 103). |
+| RFC 8925 | IPv6-Only Preferred Option for DHCPv4 (108) — `option ipv6-only-preferred`. |
+
+### DHCPv6
+
+| RFC / Internet-Draft | Description |
+| --- | --- |
+| RFC 8415 | Dynamic Host Configuration Protocol for IPv6 (DHCPv6) — `service dhcpv6-server`: addresses (IA_NA) from `range`, delegated prefixes (IA_PD) from `prefix-delegation`, `static-mapping` by DUID, `preference`, `lease-time` and `option info-refresh-time` (32). `service dhcpv6-relay`: Relay-forward and Relay-reply, `max-hop-count`, and the Interface-ID option (18) with `use-interface-id-option`. |
+| RFC 3646 | DNS Configuration Options for DHCPv6 — `name-server` (23), `domain-search` (24). |
+| RFC 3319 | DHCPv6 Options for SIP Servers — `option sip-server`, by name (21) or address (22). |
+| RFC 3898 | NIS Configuration Options for DHCPv6 — `nis-server` (27), `nisplus-server` (28), `nis-domain` (29), `nisplus-domain` (30). |
+| RFC 4075 | SNTP Configuration Option for DHCPv6 (31) — `option sntp-server`. |
+| RFC 6603 | Prefix Exclude Option for DHCPv6-based Prefix Delegation — `prefix-delegation … excluded-prefix` and `excluded-prefix-length`. |
+
+`option wpad-url` (DHCPv4 option 252) and the vendor options
+(`vendor-option ubiquiti unifi-controller`, `vendor-option cisco
+tftp-server`) have no RFC.
 
 ## IKE and IPsec
 

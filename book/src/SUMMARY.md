@@ -41,11 +41,22 @@
   - [How insomnia Drives keepalived](ch-05-04-keepalived-and-insomnia.md)
   - [Sample Configurations](ch-05-05-sample-configurations.md)
 
+## DHCP
+
+- [DHCP](ch-06-00-what-is-dhcp.md)
+  - [DHCPv4 Server](ch-06-01-dhcp-server.md)
+  - [DHCPv6 Server](ch-06-02-dhcpv6-server.md)
+  - [DHCP Relay](ch-06-03-dhcp-relay.md)
+  - [DHCP in a VRF](ch-06-04-dhcp-in-a-vrf.md)
+  - [How insomnia Drives Kea and the Relay Agent](ch-06-05-kea-and-insomnia.md)
+  - [Sample Configurations](ch-06-06-sample-configurations.md)
+
 ## Show Commands
 
 - [Firewall](ch-03-00-show-firewall.md)
 - [IPsec](ch-03-01-show-ipsec.md)
 - [VRRP](ch-03-02-show-vrrp.md)
+- [DHCP](ch-03-03-show-dhcp.md)
 
 ## Testing
 
