@@ -161,7 +161,13 @@ fi
 # keeps the private mounts.
 ZEBRA="$(command -v zebra-rs)"
 YANG="$(cd "$(dirname "$ZEBRA")/../share/zebra-rs/yang" && pwd)"
-"$ZEBRA" --feature insomnia --daemon \
+# ZEBRA_HOSTNAME_STUB_DIR: with --feature insomnia zebra-rs makes `system
+# hostname` the system's host name, and this network namespace shares the
+# HOST's. zebra-rs refuses outside the default network namespace by itself;
+# the stand-in directory (the path bdd/src/netns.rs gives its own daemons)
+# keeps this one off the real name a second time.
+ZEBRA_HOSTNAME_STUB_DIR="/tmp/zebra-rs-hostname/$NS" \
+    "$ZEBRA" --feature insomnia --daemon \
     --log-output=file --log-file="logs/$NS.log" \
     --pid-file="/tmp/$NS.pid" -c /dev/null --yang-path "$YANG"
 

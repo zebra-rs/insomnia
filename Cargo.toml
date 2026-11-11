@@ -74,7 +74,17 @@ depends = "$auto, nftables"
 # drives kea-dhcp4 / kea-dhcp6 through the insomnia-kea-dhcp{4,6}@ template
 # units. Recommends rather than Depends: each backend works fine without the
 # others' daemons installed.
-recommends = "strongswan-swanctl, charon-systemd, keepalived, kea-dhcp4-server, kea-dhcp6-server"
+#
+# libnss-myhostname is for zebra-rs, not for a backend. This package's
+# zebra-rs.service drop-in turns on --feature insomnia, and with it zebra-rs
+# makes `system hostname` the system's host name. /etc/hosts still names the
+# old host then, and where nothing else resolves the new name sudo warns
+# "unable to resolve host" and `hostname -f` fails. nss-myhostname resolves
+# the local name whatever it is; its package adds `myhostname` to the hosts
+# line of /etc/nsswitch.conf. It belongs here and not in the zebra-rs
+# package, which is also installed where the feature is off and the name is
+# left alone.
+recommends = "strongswan-swanctl, charon-systemd, keepalived, kea-dhcp4-server, kea-dhcp6-server, libnss-myhostname"
 # The whole point of this daemon is enforcing zebra-rs's firewall/vpn config,
 # but it can run on a different host than zebra-rs (tcp://HOST:PORT), so the
 # zebra-rs package itself is only suggested.

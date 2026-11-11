@@ -59,6 +59,40 @@ start zebra-rs differently, put a drop-in of the same name in
 `/etc/systemd/system/zebra-rs.service.d/`, which replaces the
 package's.
 
+### The feature also names the system
+
+`--feature insomnia` adds more than the trees insomnia enforces. With
+it zebra-rs treats itself as the owner of the whole system's
+configuration, and applies one leaf itself: `system hostname`.
+
+Without the feature, `set system hostname r1` names the router inside
+zebra-rs only (the prompt, `show hostname`, the names IS-IS and BGP
+advertise). With it, a zebra-rs from the release after 26.11.2 also
+makes it the system's host name when the commit ends:
+
+- the kernel host name, which `hostname` and `uname -n` print;
+- `/etc/hostname`, so the name holds from the start of the next boot.
+
+`delete system hostname` gives the system back the name it had before.
+Only a zebra-rs in the default network namespace does any of this; one
+started with `ip netns exec` leaves the name alone. The zebra-rs manual
+has the details under *Command Line Options*, `--feature`.
+
+Two things follow for a host that already runs zebra-rs with insomnia:
+
+- **The name changes at the upgrade.** If the configuration has a
+  `system hostname` that differs from the system's, the system is
+  renamed the first time the new zebra-rs starts. Installing insomnia
+  on a host whose zebra-rs ran without the feature has the same effect
+  at the restart that turns it on.
+- **`/etc/hosts` is not edited.** A Debian install has a `127.0.1.1`
+  line with the old name. Where neither systemd-resolved nor
+  `nss-myhostname` resolves the new name, `sudo` prints `unable to
+  resolve host r1` and `hostname -f` fails. The package therefore
+  recommends `libnss-myhostname`, which resolves the local name whatever
+  it is; installing it adds `myhostname` to the `hosts:` line of
+  `/etc/nsswitch.conf`.
+
 ## Connecting to zebra-rs
 
 ### `--host ENDPOINT`
