@@ -362,6 +362,20 @@ pub async fn delete_veth(veth_host: &str) -> Result<()> {
     Ok(())
 }
 
+/// The directory standing in for the system's host name for the zebra-rs
+/// of `netns` (`ZEBRA_HOSTNAME_STUB_DIR`, see zebra-rs's
+/// `src/rib/hostname.rs`): `kernel` for the kernel name, `hostname` for
+/// `/etc/hostname`, `saved.json` for the name found at the first takeover.
+/// The node scripts under `tests/scripts/` use the same path.
+///
+/// Under `/run`, not `/tmp`: the daemon writes here as root at a name
+/// anybody can predict, and in a world-writable directory another user
+/// could put a symbolic link there first. Only root creates entries in
+/// `/run`. The daemon makes the directory itself.
+pub fn hostname_stub_dir(netns: &str) -> String {
+    format!("/run/zebra-rs-bdd/hostname/{netns}")
+}
+
 /// Spawn a process in a network namespace (non-blocking)
 pub async fn spawn_in_netns(
     netns: &str,
@@ -400,6 +414,17 @@ pub async fn spawn_in_netns_env(
     if is_zebra {
         assignments.push(format!(
             "ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}"
+        ));
+        // With `--feature insomnia`, which every router here runs with,
+        // zebra-rs makes `system hostname` the system's host name, and a
+        // network namespace shares the HOST's: the real `sethostname(2)`
+        // from a BDD daemon would rename the development machine. zebra-rs
+        // refuses outside the default network namespace by itself; this
+        // stand-in directory keeps a BDD daemon off the real name a second
+        // time. An older zebra-rs ignores the variable.
+        assignments.push(format!(
+            "ZEBRA_HOSTNAME_STUB_DIR={}",
+            hostname_stub_dir(netns)
         ));
     }
     assignments.extend(env.iter().map(|(k, v)| format!("{k}={v}")));

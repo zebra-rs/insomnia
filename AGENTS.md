@@ -252,6 +252,14 @@ commit.
   `vtyctl apply`.
 - The toolchain resolves from `$ZEBRA_BDD_PREFIX`, then `bdd/.stage/`, then `/usr`.
   Staged files are copies, so rebuilding mid-run cannot swap the binary.
+- Every zebra-rs a feature starts, through the harness or a node script, gets
+  `ZEBRA_HOSTNAME_STUB_DIR=/run/zebra-rs-bdd/hostname/<scoped ns>`. With `--feature insomnia`
+  zebra-rs makes `system hostname` the system's host name, and a network namespace shares
+  the host's: the real `sethostname(2)` would rename the development machine. zebra-rs
+  refuses outside the default network namespace on its own; the stand-in is the second
+  guard. A new script that starts zebra-rs must set it too, and under `/run`: zebra-rs
+  writes there as root, and a predictable name under `/tmp` could be a symbolic link
+  another user put there.
 - IPsec nodes run via `bdd/tests/scripts/ipsec_node.sh` inside a private mount namespace
   so two charons can share the stock `/etc/swanctl` and `/run/charon.vici` paths. Bring
   the responder up before the initiator; see the feature header for why.

@@ -125,7 +125,13 @@ systemctl daemon-reload
 
 # --- zebra-rs and insomnia in pvt --------------------------------------
 YANG="$STAGE/share/zebra-rs/yang"
-ip netns exec pvt "$STAGE/bin/zebra-rs" --feature insomnia --daemon \
+# ZEBRA_HOSTNAME_STUB_DIR: with --feature insomnia zebra-rs makes `system
+# hostname` the system's host name, and `pvt` shares the HOST's. zebra-rs
+# refuses outside the default network namespace by itself; the stand-in
+# directory keeps this one off the real name a second time. Under /run,
+# where only root creates entries: zebra-rs writes there as root.
+ip netns exec pvt env ZEBRA_HOSTNAME_STUB_DIR=/run/zebra-rs-bdd/hostname/pvt \
+    "$STAGE/bin/zebra-rs" --feature insomnia --daemon \
     --log-output=file --log-file="$LOGS/zebra.log" \
     --pid-file="$LOGS/zebra.pid" -c /dev/null --yang-path "$YANG"
 mkdir -p /run/insomnia-pvt
