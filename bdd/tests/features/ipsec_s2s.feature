@@ -1,9 +1,9 @@
 @serial
 @ipsec_s2s
-Feature: Site-to-site IPsec with strongSwan (vpn ipsec, ISO feature)
+Feature: Site-to-site IPsec with strongSwan (vpn ipsec, insomnia feature)
 
   zebra-rs owns the VyOS-style `vpn ipsec` config subtree (enabled
-  with `--feature iso`); insomnia subscribes to it over the
+  with `--feature insomnia`); insomnia subscribes to it over the
   zebra.config.v1 gRPC API, renders strongSwan swanctl configuration
   and loads it into charon over the vici socket, and answers
   `show vpn ipsec` on the zebra-rs CLI as the zebra.show.v1 provider —
