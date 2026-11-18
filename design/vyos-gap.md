@@ -1,19 +1,30 @@
 # VyOS feature gap — design
 
-Status: research, 2026-10-21. Nothing here is implemented yet. This
-document is the inventory and the proposed order of work.
+Status: analysis of 2026-10-21, with the status of every item brought up
+to date on 2026-11-16 (§2.1 lists what changed). This document is the
+inventory and the proposed order of work. The comparison with VyOS is
+still the reading of 2026-10-21: vyos-1x was not compared again.
 
-Baselines (line numbers below refer to these commits):
+Baselines:
 
-| Repo | Commit |
-|:--|:--|
-| vyos-1x | `rolling` @ `7f2c893` (2026-10-20) |
-| zebra-rs | `141da2fc` (2026-10-19, v26.10.3) |
-| insomnia | `ee4dfaa` |
+| Repo | Analysis (line numbers refer to this) | Status checked at |
+|:--|:--|:--|
+| vyos-1x | `rolling` @ `7f2c893` (2026-10-20) | not compared again |
+| zebra-rs | `141da2fc` (2026-10-19, v26.10.3) | `483c330d` (2026-11-16, v26.11.4) |
+| insomnia | `ee4dfaa` | `6f6c88a` (0.3.0 and the unreleased commits after it) |
 
-insomnia enforces three VyOS-shaped trees, `firewall`, `vpn ipsec` and
-`vrrp`, and its renderers follow the VyOS templates line for line. This
-document answers four questions:
+`src/firewall.rs`, `src/ipsec.rs`, `src/vici.rs`, `src/subscribe.rs` and
+both files in `proto/` have not changed since `ee4dfaa`, so their line
+numbers still hold. zebra-rs line numbers are those of `141da2fc` unless a
+row names the newer commit. `firewall.yang` and `ipsec.yang` are unchanged
+in zebra-rs too.
+
+At the time of the analysis insomnia enforced three VyOS-shaped trees,
+`firewall`, `vpn ipsec` and `vrrp`, and its renderers follow the VyOS
+templates line for line. Since 0.3.0 it also enforces the four DHCP
+`service` trees. Those have their own design (`design/dhcp.md`, which
+lists the VyOS leaves it leaves out) and are not compared leaf by leaf
+here. This document answers four questions:
 
 1. How far is each tree from VyOS rolling: schema, rendering, show
    commands and commit-time checks?
@@ -68,6 +79,10 @@ makes sense.
 - `firewall` and `vpn ipsec` keep VyOS spelling.
 - `vrrp` is VyOS's `high-availability vrrp` with the wrapper dropped
   (`design/vrrp.md`).
+- `service dhcp-server`, `dhcpv6-server`, `dhcp-relay` and `dhcpv6-relay`
+  keep VyOS spelling (`design/dhcp.md`).
+- The `vrf <name>` lists under `vrrp` and under each `service` tree are
+  zebra-rs extensions: VyOS has no per-VRF VRRP or relay.
 - Routing, interfaces and policy use zebra-rs's own models, so VyOS
   parity is not a goal there. Examples: `router bgp` for
   `protocols bgp`, `interface <name>` for `interfaces <type> <name>`,
@@ -86,9 +101,12 @@ is *unverified*, because no circinus checkout was compared.
 | Firewall | Static groups; ipv4/ipv6 filter and raw hooks; named chains; nearly every rule matcher; state-policy; logging; `show firewall` chains and groups | Overlapping group members, or a reference to something undefined, each stop the whole ruleset from loading | Zone-based firewall; `ipsec` matcher; commit-time verify |
 | NAT / conntrack / PBR | Only the firewall's `connection-status nat` matcher | Conntrack timeouts and sysctl toggles in `global-options` are dropped silently | NAT44 source, destination and `exclude`, plus `show nat` |
 | IPsec | PSK site-to-site; IKEv1/v2; ESP/IKE groups; tunnels; transport mode; the swanctl side of `vti bind`; four `show vpn ipsec` views | A bypass child can turn off encryption; a PSK with no `id` is a wildcard; `ikev2-reauth` is ignored | charon lifecycle; route-based VTI; PKI and x509 |
-| VRRP | Every VyOS VRRP leaf except `snmp`; `show vrrp`, `detail`, `statistics` | — | Only a VRF spike. The rest is checks, ops verbs, SNMP and IPVS |
+| VRRP | Every VyOS VRRP leaf except `snmp`; `show vrrp`, `detail`, `statistics`; one keepalived per VRF (`vrrp vrf <name>`); `restart process keepalived@<vrf>` | — | None at P1 since per-VRF instances shipped. The rest is checks, BDD breadth, SNMP and IPVS |
+| DHCP (not compared here) | Server on Kea and a native relay agent, IPv4 and IPv6, per VRF; `show dhcp[v6] server\|relay` | — | `design/dhcp.md` §3.3 and §20: `high-availability` (needs PKI), `dynamic-dns-update`, `hostfile-update`, `ping-check`, `clear`/`restart` verbs |
 
-**Counts.** Each DONE row groups many leaves.
+**Counts.** Each DONE row groups many leaves. The firewall, NAT and IPsec
+counts are unchanged since the analysis: nothing in those areas has
+landed.
 - **Firewall, 52 feature groups compared** (condensed to the gap rows in
   §5): DONE 7, PARTIAL 10, NOT-APPLIED 3, MISSING-SCHEMA 26, MISSING
   outside the schema 2, DEVIATION 4.
@@ -102,16 +120,43 @@ is *unverified*, because no circinus checkout was compared.
 - **Commits cannot be vetoed (§4.1).** zebra-rs cannot reject a commit on
   insomnia's behalf, so every VyOS `verify()` rule is at best a warning
   after the commit. In the firewall, a bad reference silently keeps the
-  old ruleset loaded.
-- **Only `show` reaches insomnia (§4.2).** `reset vpn ipsec`,
-  `reset conntrack`, `restart vrrp` and `generate pki` have no path.
+  old ruleset loaded. The one exception so far is a rule zebra-rs checks
+  itself: the reserved VRF name `default`.
+- **Few verbs reach insomnia (§4.2).** `show` does, and since zebra-rs
+  v26.11.2 `start|stop|restart process <name>`. `reset vpn ipsec`,
+  `reset conntrack`, `clear dhcp-server lease` and `generate pki` still
+  have no path.
 - **One subtree per subscription (§4.3).** NAT, PBR, x509 and zones each
-  need two.
+  need two. The DHCP backends already open two each and live with the
+  skew.
+
+### 2.1 Changes since the analysis (2026-10-21 to 2026-11-16)
+
+| What shipped | Where | Effect on this document |
+|:--|:--|:--|
+| DHCP server on Kea, native DHCP relay agent, both per VRF, with show commands and eight BDD features | insomnia 0.3.0; zebra-rs v26.11.2 (`dhcp.yang`, `container service`); `design/dhcp.md`, `design/dhcp-bdd.md` | §9 rank 2 done; D9 decided. zebra-rs's unused `system dhcp` schema is gone |
+| Process registry: `show process`, `start\|stop\|restart process`, operator holds | insomnia 0.3.0 (`src/process.rs`); zebra-rs v26.11.2; `design/process.md` | §4.2 partly closed; §4.5 has its shared apply path; `restart vrrp` has an equivalent |
+| VRF binding of daemons by a pinned cgroup-BPF socket program | insomnia 0.3.0 (`src/vrf.rs`); `design/process.md` §4 | Replaces the `LD_PRELOAD` shim; §8.4 item 3 is moot |
+| `vrrp vrf <name>`, one keepalived per VRF, BDD `vrrp_vrf` | insomnia 0.3.0; zebra-rs v26.11.2 | §8.1 first row done |
+| `crate::links`: links, addresses, VRF masters and the tentative flag from netlink | insomnia 0.3.0 (`src/links.rs`) | The VRF-membership source that FW1, FW13 and §6.4 wait for exists; §4.4 has its interface watch |
+| `default` refused as a VRF name in the insomnia trees | zebra-rs v26.11.2 (`config::check::reserved_vrf`) | First commit-time rule for these trees (§4.1) |
+| Native DHCPv4 and DHCPv6 clients | zebra-rs v26.11.3 (`src/dhcpc`) | Unblocks IPsec `dhcp-interface` (§7.2) |
+| `system hostname` names the system when zebra-rs runs with `--feature insomnia` | zebra-rs v26.11.3 | §9 `host-name` |
+| `--feature insomnia` in the book, the BDD scripts and `design/vrrp.md`; the package ships a zebra-rs drop-in that sets it | insomnia, 2026-11-09 and 2026-11-11 (after 0.3.0) | First doc correction of §3 done |
+
+**Not started:** every defect in §3 (X1–X15), every firewall, NAT,
+conntrack, PBR and IPsec gap in §5–§7, the validation RPC of §4.1, the
+platform items of §4.3, §4.4, §4.6 and §4.7, and the other doc
+corrections.
 
 ## 3. Fix first: defects in what insomnia renders today
 
 None of these needs schema work. Paths are insomnia `src/` @ `ee4dfaa`
 unless noted.
+
+**Status 2026-11-16: X1–X15 are all open.** No commit has touched
+`firewall.rs` or `ipsec.rs` since the analysis. X13 and X15 are reworded
+below for code that moved.
 
 | # | Area | Defect | VyOS | Effect | Checked by | Effort | Pri |
 |:--|:--|:--|:--|:--|:--|:--|:--|
@@ -127,28 +172,30 @@ unless noted.
 | X10 | firewall | Fragment matching overwrites the whole packet mark with `0xffff1` at priority -450 and then matches it exactly (`firewall.rs:1256-1268`, `1793-1802`) | *rolling*: sets bit 31 (OR) and clears it at filter+10 | Fragments lose any mark set elsewhere (tc, policy routing). This blocks PBR and WAN-LB marking (§6) | code reading | S | P2 |
 | X11 | firewall | `show firewall group` counts interface-group references twice; an ipv6-address-group's count includes IPv4 rules that name a group with the same name (`firewall.rs:537-584`); `-j` on a single chain returns the whole family (`480-482`, `498-500`) | — | Misleading show output | code reading | S | P3 |
 | X12 | firewall | Every resubscribe (that is, every zebra-rs restart) re-applies the ruleset even when it is unchanged, which resets counters and `recent` sets (`firewall.rs:56-98`) | Reloads only on commit | Counters are lost. Fix: compare before applying, as `keepalived::apply` does | code reading | S | P3 |
-| X13 | IPsec, VRRP | Files that hold secrets are created with default permissions and only then changed to `0600`: `swanctl.conf` (PSKs, `ipsec.rs:125-129`) and `keepalived.conf` (VRRP password, `keepalived.rs:229-241` `write_atomic`) | — | For a short window the file is readable under the process umask (`0644` with systemd's default `0022`). Fix: create the temp file with mode `0600` up front, in one helper shared by both backends | code reading | S | P1 |
+| X13 | IPsec, VRRP | Files that hold secrets are created with default permissions and only then changed to `0600`: `swanctl.conf` (PSKs, `ipsec.rs:125-129`) and `keepalived.conf` (VRRP password; since 0.3.0 through the shared `process::write_atomic`, `process.rs:90-97` @ `6f6c88a`, which still writes first and sets the mode after) | — | For a short window the file is readable under the process umask (`0644` with systemd's default `0022`). Fix: have `process::write_atomic` create the temp file with the requested mode up front, and make `swanctl_apply` use it | code reading | S | P1 |
 | X14 | firewall | Rule `time weekdays` is passed through as written (`firewall.rs:1999-2011`), so the book's own example `weekdays Mon,Tue,Wed,Thu,Fri` (ch-01-02) renders `day {"Mon",…}` | VyOS expands the abbreviations | nft accepts only full day names (or numbers), so the whole ruleset fails to load. The fix is milestone 1 of [fw-matchers](plans/fw-matchers.md) (Phase 0), separate from the rest of FW17 | `nft -c` 1.0.9: `"Mon"` rejected ("did you mean `Monday`?"), `"Monday"` accepted | S | P1 |
-| X15 | show routing (zebra-rs) | zebra-rs `SHOW_PROTOS` predicates (`is_bgp`, `is_ospf`, …, `manager.rs:1979-2091`) test `CommandPath.name` anywhere in the path. For a list key that field holds the value the user typed (`parse.rs:812-820`), and BGP is checked first | — | `show firewall ipv4 name bgp`, `show firewall group ospf` or `show vrrp detail group isis` is sent to the wrong daemon. Fix: match only path elements that are not key values (`key` empty), or match on the root. Milestone 1 of [fw-opmode](plans/fw-opmode.md) | code reading | S | P2 |
+| X15 | show routing (zebra-rs) | zebra-rs `SHOW_PROTOS` predicates (`is_bgp`, `is_ospf`, …, `manager.rs:1979-2091`; `2173-2326` @ `483c330d`) test `CommandPath.name` anywhere in the path. For a list key that field holds the value the user typed (`parse.rs:812-820`), and BGP is checked before the insomnia providers | — | `show firewall ipv4 name bgp`, `show firewall group ospf` or `show vrrp detail group isis` is sent to the wrong daemon. The views added since have the same exposure (`show vrrp vrf bgp`, `show dhcp server leases pool ospf`). Only `show process <name>` is protected: v26.11.2 put `is_process` first in the table, which works around the cause for that one list. Fix: match only path elements that are not key values (`key` empty), or match on the root. Milestone 1 of [fw-opmode](plans/fw-opmode.md) | code reading | S | P2 |
 
-**Documentation that is wrong today:**
-- **Feature rename.** `--feature iso` is now `--feature insomnia`
-  (zebra-rs `ab1c0774`; `iso` is still accepted, with a deprecation
-  warning). Stale in:
-  - book ch-00-03, ch-01-00, ch-02-00, ch-04-00, ch-05-00, ch-05-05;
-  - BDD `bdd/tests/scripts/vrrp_node.sh:72` and `ipsec_node.sh:88`;
-  - `design/vrrp.md` §4, §9 and §10.
-
-  The BDD scripts break once the alias is removed.
-- **ch-01-06 (connection tracking):**
-  - It says a commit that sets conntrack timeouts logs a warning. Nothing
-    is logged.
-  - It says notracked packets show `state invalid`. In nft they are
+**Documentation that is wrong today** (re-read on 2026-11-16):
+- **Feature rename: done, 2026-11-11.** `--feature iso` is now
+  `--feature insomnia` (zebra-rs `ab1c0774`, first in v26.10.2; `iso` is
+  still accepted, with a deprecation warning). The book, the BDD node
+  scripts and `design/vrrp.md` use the new name, and the package ships a
+  zebra-rs drop-in that sets it. The BDD scripts name `insomnia` outright
+  and do not fall back, so the suite needs a zebra-rs of v26.10.2 or
+  later.
+- **ch-01-06 (connection tracking), still wrong:**
+  - Line 72 says a commit that sets conntrack timeouts logs a warning.
+    Nothing is logged.
+  - Line 61 says notracked packets show `state invalid`. In nft they are
     `ct state untracked`, which `firewall.yang` cannot match.
-- **ch-01-10 (static NAT):** it writes `inbound-interface name eth0`.
-  VyOS static NAT uses a plain `inbound-interface eth0`.
-- **ch-02-01 and appendix A:** they say `ikev2-reauth` works (X5).
-- **`design/vrrp.md`:** corrections are listed in §8.4.
+- **ch-01-10 (static NAT), still wrong:** line 11 writes
+  `inbound-interface name eth0`. VyOS static NAT uses a plain
+  `inbound-interface eth0`.
+- **ch-02-01 (line 75) and appendix A (RFC 7296 row), still wrong:** they
+  say `ikev2-reauth` works (X5).
+- **`design/vrrp.md`:** corrections are listed in §8.4, with their
+  status.
 
 ## 4. Cross-cutting gaps
 
@@ -163,6 +210,21 @@ What exists today:
 - Every VyOS `verify()` rule therefore becomes an insomnia
   skip-with-warning. Many become nothing at all, and the firewall cases
   in X2 become a ruleset that silently fails to load.
+
+Status 2026-11-16:
+- **Layer 1 has started, for the new trees only.** `dhcp.yang` marks
+  `subnet-id`, the range `start`/`stop`, the static-route `next-hop` and
+  the delegated prefix lengths `mandatory`. `firewall.yang` and
+  `ipsec.yang` are unchanged, and `vrrp.yang` gained no constraint.
+- **zebra-rs has its first rule for these trees:**
+  `config::check::reserved_vrf` (v26.11.2) refuses `default` as a name in
+  the `vrrp vrf` and `service … vrf` lists; a startup config only gets a
+  warning. It is a structural rule that needs nothing from insomnia, so
+  it does not settle D1.
+- **Layer 2 has not started.** `proto/config.proto` is unchanged.
+- **Layer 3 is how the new backends were built:** the DHCP and per-VRF
+  renderers skip with a warning (an interface outside its VRF, a VRF
+  that does not exist). The firewall still lacks it (X1, X2).
 
 Rules that are not enforced at commit:
 
@@ -195,23 +257,34 @@ the server). Effort L. P1.
 
 ### 4.2 Operational verbs beyond `show`
 
-- `ShowOrder` routing works by `/show/…` prefix (`src/provider.rs`).
-  zebra-rs handles `clear` in-process and has no reply path for it
-  (`manager.rs:1500-1536`). There is no `restart`, `reset` or `generate`
-  grammar.
-- Blocked by this:
+- At the analysis, `ShowOrder` routing worked by `/show/…` prefix only
+  (`src/provider.rs`), zebra-rs handled `clear` in-process with no reply
+  path (`manager.rs:1500-1536`), and there was no `restart`, `reset` or
+  `generate` grammar.
+- **Partly closed (zebra-rs v26.11.2, insomnia 0.3.0).** A line whose
+  first word is `start`, `stop` or `restart` is redirected like a show
+  order, so `start|stop|restart process <name>` reach insomnia's
+  `process` provider over the existing `zebra.show.v1` stream as
+  `/stop/process` with the name in `args` (`src/provider.rs:35`,
+  `src/process.rs` @ `6f6c88a`; `design/process.md` §6 and §8). It needed
+  no new order kind and no new service, and it keeps the oneshot reply
+  contract. The names are the registry's instances: `keepalived@<vrf>`,
+  `kea-dhcp4@<vrf>`, `kea-dhcp6@<vrf>`, `dhcp-relay`.
+- So `restart process keepalived@default` does what VyOS's `restart vrrp`
+  does, and `restart process kea-dhcp4@default` what `restart dhcp
+  server` does, under a different spelling.
+- Still blocked:
 
-  | Area | Blocked commands |
-  |:--|:--|
-  | IPsec | `reset vpn ipsec site-to-site …`, `restart ipsec` |
-  | Conntrack | `reset conntrack`, `reset conntrack-sync …` |
-  | VRRP | `restart vrrp` |
-  | PKI | `generate pki …` |
+  | Area | Blocked commands | Missing |
+  |:--|:--|:--|
+  | IPsec | `reset vpn ipsec site-to-site …`, `restart ipsec` | a `reset` verb; charon is not in the process registry (§4.5) |
+  | Conntrack | `reset conntrack`, `reset conntrack-sync …` | a `reset` verb |
+  | DHCP | `clear dhcp-server lease`, `clear dhcpv6-server lease` | zebra-rs keeps `clear` in-process |
+  | PKI | `generate pki …` | a `generate` verb and a config write path |
 
-- Proposal: extend `zebra.show.v1` with an exec order kind that keeps the
-  same oneshot reply contract (answered exactly once, a dropped oneshot
-  becomes an error chunk), or add a sibling `zebra.exec.v1`. Either way
-  zebra-rs needs the grammar, plus routing of those verbs to providers.
+- Proposal: redirect `reset`, `generate` and the provider-owned `clear`
+  lines the same way as `start|stop|restart`. zebra-rs needs the
+  grammar, plus routing of those verbs to providers.
 - insomnia also needs a VICI request encoder with `terminate` and
   `initiate` (`src/vici.rs` is list-only today), and needs to keep the
   last committed IPsec model (`process()` drops it).
@@ -226,11 +299,19 @@ the server). Effort L. P1.
 | NAT, PBR, conntrack | own tree + `firewall group` (nft sets are table-scoped, so each table re-renders the groups) |
 | x509 IPsec | `vpn ipsec` + `pki` |
 | Route-based VPN | `vpn ipsec` + VTI interfaces |
-| Zone firewall with VRF members, VRF conntrack zones | VRF membership; the plans read it from the kernel through `crate::links` ([fw-global-options](plans/fw-global-options.md)) instead of a second subscription |
+| Zone firewall with VRF members, VRF conntrack zones | VRF membership, read from the kernel through `crate::links` instead of a second subscription. `src/links.rs` exists since 0.3.0 and the VRRP and DHCP backends already use it |
 | `virtual-server` | `vrrp` + `virtual-server` (same keepalived file) |
+| DHCP relay, DHCP server (shipped) | `service dhcp-relay` + `dhcpv6-relay`; `service dhcp-server` + `dhcpv6-server` |
 
 - Two streams have no ordering guarantee, so one commit that touches both
   trees arrives as two events, with a transient mismatch in between.
+- Status 2026-11-16: zebra-rs is unchanged (`SubscribeRequest.path` is
+  still one prefix). The two DHCP backends are the first consumers with
+  two subtrees. Each opens two subscriptions; the relay renders nothing
+  until both snapshots have arrived, and a commit that touches both of
+  its trees is applied in two steps. That is acceptable there because
+  the two trees do not reference each other. NAT with `firewall group`
+  does not have that excuse.
 - Proposal: a multi-path subscribe in zebra-rs that delivers one snapshot
   and then one event per commit, covering all the named subtrees
   atomically. This is the same contract as today, widened.
@@ -247,8 +328,8 @@ the server). Effort L. P1.
   `ip_forward`, `rp_filter`, `forwarding`, `seg6`, `keep_addr_on_down`,
   `vrf.strict_mode`, `tcp_l3mdev_accept`, `mpls.platform_labels`).
 - Per-interface `conf.<if>.*` keys must be re-applied when an interface
-  appears, which needs either zebra-rs interface events or a netlink
-  watch.
+  appears. The netlink watch for that exists since 0.3.0
+  (`crate::links`); the writer itself has not been started.
 - zebra-rs forces `rp_filter=0`, so `source-validation` must stay nft
   `fib` rules, which is what VyOS rolling does too.
 - Decision needed: VyOS always writes its defaults (directed-broadcast
@@ -260,16 +341,21 @@ the server). Effort L. P1.
 
 ### 4.5 Daemon lifecycle
 
-- **keepalived:** insomnia owns its instances (compare-before-reload,
-  systemd or signal mode).
-- **charon:** insomnia does not own it (`ipsec.rs:20-24`), so every
-  strongswan.d setting is blocked: `disable-route-autoinstall`, `log`,
-  `interface`, `flexvpn`, `virtual-ip`, `retransmission`, and the DHCP
-  and RADIUS plugins.
-- Proposal: an insomnia-owned `strongswan.d` drop-in with
-  compare-before-restart, the same shape as `keepalived::apply`, and a
-  signal mode for BDD.
-- **conntrackd** (§6.5) would follow the same pattern.
+- **keepalived, Kea, the DHCP relay agent:** insomnia owns their
+  instances through one registry since 0.3.0 (`src/process.rs`,
+  `design/process.md`): compare-before-reload, systemd or signal/socket
+  mode, `show process`, operator holds (`stop process` survives commits
+  and insomnia restarts), and a per-VRF instance bound to its VRF by a
+  pinned cgroup-BPF socket program before it starts (`src/vrf.rs`).
+- **charon:** insomnia still does not own it (`ipsec.rs:20-24`), and it
+  is not in the registry. So every strongswan.d setting is blocked:
+  `disable-route-autoinstall`, `log`, `interface`, `flexvpn`,
+  `virtual-ip`, `retransmission`, and the DHCP and RADIUS plugins.
+- Proposal: an insomnia-owned `strongswan.d` drop-in applied through
+  `process::reload` with compare-before-restart, registered as a process
+  so that `restart process` covers `restart ipsec`, and a signal mode
+  for BDD.
+- **conntrackd** (§6.5) would register the same way.
 - Owner: insomnia. Effort M. P2. Per strongSwan 5.9.13's source,
   charon installs no routes for children with an `if_id` (VTI), so
   route-based VTI does not strictly need `install_routes = no`
@@ -287,6 +373,8 @@ the server). Effort L. P1.
 - Proposal: a zebra-rs secret-leaf extension that redacts in show
   output. Document that `unix:` is required once PKI exists.
 - Owner: zebra-rs. Effort M. P2, rising to P1 together with PKI.
+- Status 2026-11-16: not started; zebra-rs has no masking extension. The
+  DHCP trees added no secret leaf.
 
 ### 4.7 eBPF fast path
 
@@ -301,8 +389,14 @@ the server). Effort L. P1.
 - Until that is settled, document insomnia's nftables features as
   applying to kernel-forwarded traffic only, or have zebra-rs refuse the
   combination. This needs a check, not a guess: S, P1.
+- Status 2026-11-16: no result is recorded. The plan is unchanged and
+  the book says nothing about eBPF ports.
 
 ## 5. Firewall
+
+Status 2026-11-16: unchanged. `firewall.yang` and `src/firewall.rs` are
+as analysed, so every row below stands. The one prerequisite that has
+landed is `crate::links` for FW1's VRF members and FW13.
 
 **DONE:**
 - **Groups:** address, ipv6-address, network, ipv6-network, port, mac and
@@ -322,7 +416,7 @@ VyOS 7f2c893 has no reject types, so a bare `reject` is parity.
 
 | # | Feature (VyOS path under `firewall`) | Status | Needs | Effort | Pri |
 |:--|:--|:--|:--|:--|:--|
-| FW1 | `zone <z>`: `member interface\|vrf`, `from <z> firewall name\|ipv6-name`, `default-firewall`, `intra-zone-filtering`, `local-zone`, `default-action`, `default-log` | MISSING-SCHEMA | nft only, following `nftables-zone.j2`: ZONE_FORWARD/LOCAL/OUTPUT at priority 1 and `VZONE_<z>` chains that jump to `NAME_`. `member vrf` needs VRF membership from the kernel (`crate::links`) and a re-render when an interface is enslaved. Plus `show firewall zone-policy` | M (L with vrf) | P1 |
+| FW1 | `zone <z>`: `member interface\|vrf`, `from <z> firewall name\|ipv6-name`, `default-firewall`, `intra-zone-filtering`, `local-zone`, `default-action`, `default-log` | MISSING-SCHEMA | nft only, following `nftables-zone.j2`: ZONE_FORWARD/LOCAL/OUTPUT at priority 1 and `VZONE_<z>` chains that jump to `NAME_`. `member vrf` needs VRF membership from the kernel (`crate::links`, in place since 0.3.0) and a re-render when an interface is enslaved. Plus `show firewall zone-policy` | M (L with vrf) | P1 |
 | FW2 | rule `ipsec match-ipsec\|match-none` in/out | MISSING-SCHEMA | `meta ipsec exists\|missing`, `rt ipsec …`. Per-hook subsets: in on input/prerouting, out on output, both on forward/name | S | P1 |
 | FW3 | commit-time verify (29 rule families) | MISSING | §4.1 | L | P1 |
 | FW4 | `global-options source-validation`, `ipv6-source-validation` | NOT-APPLIED | nft only: `fib saddr . iif oif 0 drop` at prerouting -300, as rolling does. The fib/VRF interplay needs a BDD test | S | P2 |
@@ -372,7 +466,8 @@ Firewall order:
 ## 6. NAT, connection tracking, policy routing
 
 None of this exists in zebra-rs except FW5 and FW6 above. zebra-rs `src/`
-has no NAT, conntrack or `ip rule` code.
+has no NAT, conntrack or `ip rule` code. Status 2026-11-16: unchanged, in
+zebra-rs `483c330d` and in insomnia.
 
 ### 6.1 Engine map
 
@@ -450,7 +545,7 @@ with add+delete, like `zebra_firewall`.
 | global timeouts (FW6) and toggles (FW5) | NOT-APPLIED | sysctl writer, in the firewall backend (already subscribed) | insomnia | S | P2 |
 | `system conntrack table-size \| hash-size \| expect-table-size` | MISSING-SCHEMA | sysctl; whether these are writable inside a non-init netns (BDD) is *unverified* | insomnia `conntrack` | S | P2 (busy NAT boxes overflow the default) |
 | `system conntrack modules ftp\|sip\|tftp\|pptp\|h323\|rtsp\|nfs\|sqlnet` | MISSING-SCHEMA | modprobe/rmmod, `ct helper` objects, a chain at -5 | insomnia `conntrack` | M | P2 (FTP/SIP/PPTP through NAT) |
-| per-VRF ct zones (derived in VyOS) | MISSING | `inet zebra_vrf_zones` iif→zone map + NAT anchor at 99. Membership comes from the kernel through `crate::links` ([fw-global-options](plans/fw-global-options.md)); the zone number can be any stable per-VRF value | insomnia `conntrack` | M | P2 (required before NAT or a stateful firewall across overlapping VRFs) |
+| per-VRF ct zones (derived in VyOS) | MISSING | `inet zebra_vrf_zones` iif→zone map + NAT anchor at 99. Membership comes from the kernel through `crate::links` (in place since 0.3.0; [fw-global-options](plans/fw-global-options.md)); the zone number can be any stable per-VRF value | insomnia `conntrack` | M | P2 (required before NAT or a stateful firewall across overlapping VRFs) |
 | `tcp loose\|max-retrans\|half-open`, `flow-accounting`, `log timestamp` | MISSING-SCHEMA | sysctl | insomnia | S | P3 |
 | `timeout custom` | MISSING-SCHEMA | `ct timeout` objects, chain at -199. VyOS's ip6 table renders `l3proto ip`, which is likely a bug, so check before porting | insomnia | M | P3 |
 | `ignore` rules | MISSING-SCHEMA | VyOS itself points to `firewall … prerouting raw`, which is DONE | — | S | P3 |
@@ -478,10 +573,11 @@ insomnia-gated child of the existing zebra-rs `container system`, plus
   the hook uses keepalived's separate generic `notify` slot instead, and
   user transition scripts stay as they are.
 - **Lifecycle.** The same render / compare / reload pattern as
-  keepalived (§4.5).
-- **VRF.** With per-VRF keepalived (`design/vrrp.md` §13), conntrackd
-  needs the same `BPFProgram=` binding (`design/process.md` §4) or must
-  stay in the default VRF.
+  keepalived (§4.5), now `process::reload` with a registry entry.
+- **VRF.** keepalived runs per VRF since 0.3.0 (`design/vrrp.md` §13), so
+  a sync group may live in a VRF. conntrackd then needs the same
+  `BPFProgram=` binding (`design/process.md` §4, `Registry::bind`) or
+  must stay in the default VRF.
 - Owner: insomnia. Effort M. P3.
 
 ### 6.6 Policy-based routing: `policy route`, `route6`, `local-route`
@@ -553,6 +649,10 @@ own daemon and certificates.
 
 ## 7. IPsec
 
+Status 2026-11-16: unchanged. `ipsec.yang`, `src/ipsec.rs` and
+`src/vici.rs` are as analysed. The only movement is outside them:
+zebra-rs now has a DHCP client, which the `dhcp-interface` row needed.
+
 **DONE**, verified line for line against `peer.j2` and `template.py`:
 - **esp-group:** every leaf, including the full proposal lists and pfs
   groups 1–32.
@@ -583,7 +683,7 @@ own daemon and certificates.
 | peer `vti bind` (the interface side) | PARTIAL | §7.3 VTI | both | M | P1 |
 | peer `vti traffic-selector local\|remote` | MISSING-SCHEMA | swanctl only | both | S | P2 |
 | peer `connection-type trap` (*rolling* rename of `respond`, migration 13→14) | DEVIATION (undocumented) | accept `trap` as an alias; the rendering is already identical | zebra-rs | S | P2 (pasting current VyOS configs) |
-| peer and psk `dhcp-interface` | NOT-APPLIED (peer skipped, psk static ids only) | zebra-rs DHCP client (a schema stub today), plus a re-render on lease change | both | M | P2 |
+| peer and psk `dhcp-interface` | NOT-APPLIED (peer skipped, psk static ids only) | The zebra-rs DHCP client exists since v26.11.3 (`interface <if> ipv4 address dhcp`), and `crate::links` reports the leased address. Left to do: look the address up in the IPsec backend and re-render when it changes | insomnia | S (was M, with the client) | P2 |
 | `remote-access` (connections, local-user / EAP-MSCHAPv2 / EAP-TLS / RADIUS authentication, address pools, DHCP pools) | MISSING-SCHEMA (insomnia always renders an empty `pools {}`) | swanctl `ra-<n>`; PKI for the default x509 server mode; eap and radius plugins + strongswan.d (§4.5); redaction of local-user passwords (§4.6) | both | M–L | P2 |
 | peer `authentication mode rsa` (pki key-pair), `use-x509-id` | MISSING-SCHEMA | PKI key-pairs; `pubkey/` files | both | M | P2 |
 | `log level\|subsystem`, `interface`, `options flexvpn\|virtual-ip\|interface` | NOT-APPLIED (warned) | strongswan.d + restart | insomnia | S | P3 |
@@ -686,13 +786,13 @@ has no history. What remains:
 
 | Feature | Status | Needs | Effort | Pri |
 |:--|:--|:--|:--|:--|
-| VRRP in a VRF (`design/vrrp.md` §13) | MISSING-SCHEMA + NOT-APPLIED | First a spike: a multicast group on a VRF-enslaved interface under today's `default` instance may already work, because advert sockets bind to the interface. That would shrink §13 to unicast peers, health checks and scripts | S spike, then L | P1 spike, P2 work |
+| VRRP in a VRF (`design/vrrp.md` §13) | DONE (insomnia 0.3.0, zebra-rs v26.11.2) | `vrrp vrf <name>` reuses the whole tree; one keepalived per VRF, bound by the unit's `BPFProgram=`; a group whose interface is outside the VRF is skipped with a warning; `show vrrp vrf <name> …`. A zebra-rs extension: VyOS has no per-VRF VRRP. BDD `vrrp_vrf`, and `vrf_units.sh` for the systemd side | — | — |
 | script existence/executable check (health-check and the four transition scripts) | PARTIAL (only quoting is checked) | insomnia shares a host with keepalived, so it can stat locally and warn | S | P2 |
 | `password` ≤ 8, `description` ≤ 255, health-check `timeout` ≥ 1, VIP not a network address (VyOS `ip-host`) | PARTIAL | YANG `length`/`range` + a render check (§4.1 layer 1) | S | P2 |
-| BDD breadth (IPv6 VRRPv3, unicast, auth, health-check → FAULT, track, sync-group, transition scripts, no-preempt) | MISSING (only the IPv4 multicast pair) | features | M | P2 |
-| IPv6-tentative wait before reload (VyOS T5533) | NOT-APPLIED | poll `tentative` on the hello-source address | S | P3 |
+| BDD breadth (IPv6 VRRPv3, unicast, auth, health-check → FAULT, track, sync-group, transition scripts, no-preempt) | MISSING (the IPv4 multicast pair, and the same inside a VRF) | features | M | P2 |
+| IPv6-tentative wait before reload (VyOS T5533) | NOT-APPLIED | `links::Snapshot` carries the tentative flag since 0.3.0 (the DHCPv6 server waits on it), so the VRRP backend can wait on the hello-source address without polling | S | P3 |
 | `ext:dynamic "rib:interface"` completion on the three `interface` leaves | PARTIAL | schema | S | P3 |
-| `vrrp snmp` (AgentX subagent: `--snmp`), `vrrp snmp trap` (`enable_traps`) | MISSING-SCHEMA | Two features. Either change needs a keepalived *restart*. Per-VRF instances would register the same MIB OIDs. zebra-rs has no SNMP story | M | P3 |
+| `vrrp snmp` (AgentX subagent: `--snmp`), `vrrp snmp trap` (`enable_traps`) | MISSING-SCHEMA | Two features. Either change needs a keepalived *restart*. The per-VRF instances that now exist would register the same MIB OIDs. zebra-rs has no SNMP story | M | P3 |
 | `virtual-server` (IPVS) | MISSING-SCHEMA | §8.2 | M | P3 |
 | conntrack-sync failover hook; mDNS repeater `vrrp-disable`; password masking | MISSING (cross-feature) | §6.5, an mDNS tree, §4.6 | — | P3 |
 
@@ -728,18 +828,25 @@ has no history. What remains:
 | VyOS | zebra-rs / insomnia | Status |
 |:--|:--|:--|
 | `show vrrp`, `show vrrp detail`, `show vrrp statistics`, JSON | same | DONE. insomnia also lists DISABLED groups when keepalived has no data |
-| `show vrrp <NAME> statistics\|detail` | `show vrrp statistics\|detail group <NAME>` | DEVIATION (word order + keyword), not recorded anywhere yet. An alias is possible but ambiguous for groups named `detail`, `statistics` or `vrf`: P3 |
-| `restart vrrp` | — | MISSING (§4.2): P3 |
+| `show vrrp <NAME> statistics\|detail` | `show vrrp statistics\|detail group <NAME>` | DEVIATION (word order + keyword), still not recorded in `design/vrrp.md` §8 or the `src/vrrp.rs` module doc. An alias is possible but ambiguous for groups named `detail`, `statistics` or `vrf`: P3 |
+| — | `show vrrp vrf <name> [statistics\|detail] [group <NAME>]` | DONE (0.3.0), an extension. A VRF with no configuration answers "VRRP is not configured for VRF <name>" |
+| `restart vrrp` | `restart process keepalived@<vrf>`; also `stop process` and `start process`, and `show process` | DONE (0.3.0) under a different spelling (§4.2). `stop process` holds the instance down across commits until `start process`, an extension |
 | `show log vrrp`, `monitor log vrrp` | — | MISSING. `journalctl -u insomnia-keepalived@<vrf>` would do it, but streaming does not fit the oneshot reply: P3 |
 | `show virtual-server` | — | with §8.2 |
 
 ### 8.4 Corrections to `design/vrrp.md`
 
-1. **Feature rename** (§4, §9, §10): `feat:iso` is now `feat:insomnia`,
-   and `shipped_tree(&["iso"])` is now `shipped_vrrp_gated_on_insomnia`.
+Status 2026-11-16: item 1 is done and item 3 is moot. Items 2 and 4–7
+are open: the per-VRF work changed the header, the flag table in §7 and
+§13 of `design/vrrp.md`, and left §1, §6, §8 and §14 as they were.
+
+1. **Feature rename** (§4, §9, §10): done, 2026-11-11. The document
+   says `feat:insomnia` and `shipped_tree(&["insomnia"])`.
 2. **§8 show grammar:** shipped is
-   `show vrrp {statistics|detail} group <NAME>`. Record the word-order
-   deviation there and in the `src/vrrp.rs` module doc.
+   `show vrrp {statistics|detail} group <NAME>`. §8 still shows
+   `show vrrp statistics [<group>]`; only §13's "As built" notes spell
+   the `group` keyword. Record the word-order deviation in §8 and in
+   the `src/vrrp.rs` module doc.
 3. **§13 shim name and failure mode** (moot since 2026-11-08: the shim is
    replaced by systemd's `BPFProgram=`, whose own fail-open case is closed
    with `AssertPathExists=`; `design/process.md` §4):
@@ -763,10 +870,13 @@ has no history. What remains:
    - zebra-rs `master-refresh` 0..255 is a deliberate superset of VyOS's
      1-255.
 6. **§14 deferred list:**
+   - Remove "VRRP in a VRF", which the list still carries although §13
+     shipped.
    - Split SNMP into the subagent and traps.
-   - Add `restart vrrp`, `show log vrrp`, script validation, the tentative
-     wait, the mDNS hook, password masking, interface completion, the
-     show word order, and the BDD breadth.
+   - Add `show log vrrp`, script validation, the tentative wait, the
+     mDNS hook, password masking, interface completion, the show word
+     order, and the BDD breadth. (`restart vrrp` no longer belongs
+     there: §8.3.)
 7. **§1 reference:** change "verified against `current`" to
    "re-verified against `rolling` @ `7f2c893` (2026-10-21), by content".
 
@@ -779,8 +889,17 @@ the VyOS syntax is matched.
 | zebra-rs status | Count | Areas |
 |:--|:--|:--|
 | DONE | 9 | `interfaces loopback`, `protocols bgp\|isis\|ospf\|ospfv3\|pim\|pim6\|static\|static arp` (native models) |
-| PARTIAL | 16 | firewall, high-availability, vpn ipsec (the insomnia trees); bridge, ethernet, vxlan, policy, bfd, mpls, segment-routing, traffic-engineering, router-advert, host-name, vrf; dhcp-server and dhcp-relay (schema only, see below) |
-| ABSENT | 104 | 31 belong in zebra-rs core, 36 are insomnia-shaped, 37 are out of scope |
+| PARTIAL | 18 | firewall, high-availability, vpn ipsec, dhcp-server, dhcpv6-server, dhcp-relay, dhcpv6-relay (the insomnia trees); bridge, ethernet, vxlan, policy, bfd, mpls, segment-routing, traffic-engineering, router-advert, host-name, vrf |
+| ABSENT | 102 | 31 belong in zebra-rs core, 34 are insomnia-shaped, 37 are out of scope |
+
+The counts are the 2026-10-21 ones with the DHCP files moved, not a
+fresh read of the 129 files. Then, dhcp-server and dhcp-relay were
+PARTIAL for an unused IETF-draft `system dhcp` schema, and the two
+DHCPv6 files were ABSENT. All four are PARTIAL now for a different
+reason: they have a backend, and `design/dhcp.md` §3.3 lists the leaves
+left out. `host-name` stays PARTIAL: with `--feature insomnia` it sets
+the kernel host name and `/etc/hostname` since zebra-rs v26.11.3, but
+not `/etc/hosts`.
 
 "Insomnia-shaped" means configuration for an external daemon or a
 kernel subsystem that zebra-rs's routing core does not own, plus its
@@ -789,9 +908,9 @@ show commands. Ranked by value for a router/firewall appliance:
 | # | VyOS area | Engine | Why it matters |
 |:--|:--|:--|:--|
 | 1 | `nat`, `nat66`, `nat cgnat` | nftables | §6; table stakes at the edge |
-| 2 | `service dhcp-server`, `dhcpv6-server`, `dhcp-relay` | Kea, isc-relay | Essential on the LAN side. zebra-rs already has a `system dhcp` schema in an IETF-draft shape, with no backend, so the schema shape (VyOS or existing) must be chosen first |
+| 2 | `service dhcp-server`, `dhcpv6-server`, `dhcp-relay`, `dhcpv6-relay` | Kea; a native relay agent instead of isc-relay | **Shipped in 0.3.0** (`design/dhcp.md`), with VyOS's schema. Left: `high-availability`, DDNS, `hostfile-update`, `ping-check`, the `clear` verbs |
 | 3 | `interfaces wireguard` | kernel genetlink | The simplest modern VPN. zebra-rs could create the device while insomnia owns keys, peers and show |
-| 4 | `service dns forwarding` | PowerDNS Recursor | The LAN resolver; pairs with DHCP. Needs `system name-server` / `static-host-mapping` from core |
+| 4 | `service dns forwarding` | PowerDNS Recursor | The LAN resolver; pairs with DHCP, and brings back the DHCP leaves that need a DNS server. Needs `system name-server` / `static-host-mapping` from core |
 | 5 | Firewall remainder + `system conntrack` | nftables, sysctl | §5, §6.4 |
 | 6 | `vpn ipsec` remainder + `pki` | strongSwan | §7. PKI also gates OpenVPN and OpenConnect |
 | 7 | `service conntrack-sync` | conntrackd | §6.5; stateful failover for the VRRP pair |
@@ -813,6 +932,13 @@ show commands. Ranked by value for a router/firewall appliance:
 - **System basics:** login, name-server, domain, time-zone,
   static-host-mapping; config archive and commit-confirm.
 
+Arrived in zebra-rs core since the analysis (v26.11.3), outside the
+VyOS file list: native DHCPv4 and DHCPv6 clients (`interface <if> ipv4
+address dhcp`, `ipv6 address dhcpv6`, prefix delegation, `show dhcp[v6]
+client leases`, `renew|release`). `show dhcp …` is therefore split:
+`client` is answered inside zebra-rs, `server` and `relay` by insomnia.
+The interface, routing and system lists above are unchanged.
+
 **Out of scope:** containers, VPP, wireless/WWAN, haproxy, web proxy,
 Suricata, the console server, LCD, cloud integrations, monitoring agents,
 VyOS's HTTPS API, and image lifecycle.
@@ -824,12 +950,22 @@ in the shape of `design/vrrp.md`.
 
 Phases are ordered by dependency. Within a phase, items are independent.
 
+**Where the work went (2026-11-16).** The four weeks after the analysis
+did not follow this order. They went to DHCP, which the last paragraph
+of this section had scheduled separately and after NAT, and to what DHCP
+needed underneath: the process registry, the VRF binding and
+`crate::links`. Per-VRF VRRP came out of the same work. Phase 0 is
+therefore still the next thing to do, and its P1 defects (X1–X4, X13,
+X14) are four weeks older. Items below are marked **done** where they
+landed; everything unmarked is not started.
+
 **Phase 0: correctness and docs.** S each; insomnia unless noted.
 - X1–X4, X13 and X14 (the P1 defects), then X5–X12.
-- The doc corrections in §3 and §8.4, including the `--feature insomnia`
-  rename in the book and BDD scripts.
+- The doc corrections in §3 and §8.4. The `--feature insomnia` rename
+  in the book and BDD scripts is **done**; the rest is open.
 - The eBPF/netfilter check (§4.7).
-- The VRRP-in-VRF spike (§8.1).
+- The VRRP-in-VRF spike (§8.1): **done**, and overtaken by the full
+  per-VRF implementation.
 
 **Phase 1: platform prerequisites.**
 - Multi-path subscribe (§4.3). zebra-rs + insomnia, M.
@@ -837,15 +973,17 @@ Phases are ordered by dependency. Within a phase, items are independent.
   design of layer 2 (§4.1). zebra-rs, M to start.
 - Shared nft helper module, extracted from `firewall.rs`, and the bit-31
   fragment-mark scheme (X10). insomnia, S.
-- sysctl writer (§4.4). insomnia, M.
-- charon `strongswan.d` lifecycle (§4.5). insomnia, M.
+- sysctl writer (§4.4). insomnia, M. Its interface watch,
+  `crate::links`, is **done**.
+- charon `strongswan.d` lifecycle (§4.5). insomnia, M. The apply path
+  and registry it should use (`process::reload`) are **done**.
 
 **Phase 2: P1 features.**
 - NAT44 source/destination/exclude + `show nat … rules|statistics`
   (§6.2). Both, M.
 - Firewall `ipsec` matcher (FW2). Both, S.
-- Zone-based firewall + `show firewall zone-policy` (FW1). Both, M;
-  interface members first, VRF members once `crate::links` exists.
+- Zone-based firewall + `show firewall zone-policy` (FW1). Both, M.
+  `crate::links` exists now, so VRF members no longer have to wait.
 - Route-based VTI: zebra-rs xfrm links, link always up (§7.3).
   Both, M.
 - PKI + x509 site-to-site (§7.3). Both, L.
@@ -859,9 +997,8 @@ Phases are ordered by dependency. Within a phase, items are independent.
   (`rule <N>`, `show log firewall`, group view).
 - **IPsec:** `reset`, `show … detail` and `show vpn ike sa` (needs §4.2);
   remote access; rolling-syntax parity (`trap`, `vti traffic-selector`);
-  `dhcp-interface` once zebra-rs has a DHCP client.
-- **VRRP:** validation, BDD breadth, per-VRF instances as trimmed by the
-  spike.
+  `dhcp-interface`, unblocked now that zebra-rs has a DHCP client.
+- **VRRP:** validation, BDD breadth. Per-VRF instances are **done**.
 - **PBR:** the zebra-rs side first, then `zebra_mangle`.
 - **Secret redaction** (§4.6).
 
@@ -872,24 +1009,25 @@ Phases are ordered by dependency. Within a phase, items are independent.
 - VRRP: SNMP; `virtual-server`.
 - DMVPN; L2TP; WAN load balancing.
 
-**New backends** (§9: DHCP, DNS forwarding, WireGuard, …) are scheduled
-separately, each with its own design document. DHCP is the strongest
-candidate after NAT.
+**New backends** (§9: DNS forwarding, WireGuard, …) are scheduled
+separately, each with its own design document. DHCP, named here as the
+strongest candidate after NAT, is **done** and came first (0.3.0). NAT
+is now the largest missing feature.
 
 ## 11. Open decisions
 
-| # | Decision | Recommendation |
-|:--|:--|:--|
-| D1 | How commits are vetoed (§4.1) | YANG constraints plus a dry-run validation RPC on insomnia; commit with a warning when insomnia is not connected |
-| D2 | Non-show verbs (§4.2) | Extend `zebra.show.v1` with an exec order kind rather than add a new service |
-| D3 | Multi-subtree consumers (§4.3) | Multi-path subscribe in zebra-rs, rather than a root subscription or several skewed streams |
-| D4 | sysctl defaults (§4.4) | Write only what is configured; record the VyOS-defaults difference |
-| D5 | PBR ownership and spelling (§6.6) | nft in insomnia; `ip rule`, tables and the VRF table-ID contract in zebra-rs; rename the top-level node away from `policy` |
-| D6 | Conntrack notrack-by-default (§6.4) | Do not port |
-| D7 | VTI link state (§7.3) | Always up first; a VICI-driven state API later |
-| D8 | `virtual-server` placement (§8.2) | Top-level `virtual-server`, rendered into the VRRP keepalived instance |
-| D9 | DHCP schema shape (§9) | Decide before any backend work: keep zebra-rs's IETF-draft `system dhcp`, or adopt VyOS's `service dhcp-server` |
-| D10 | ML-KEM / post-quantum priority (§7.2) | P3 unless it becomes a product goal |
+| # | Decision | Recommendation | Status 2026-11-16 |
+|:--|:--|:--|:--|
+| D1 | How commits are vetoed (§4.1) | YANG constraints plus a dry-run validation RPC on insomnia; commit with a warning when insomnia is not connected | Open. One structural rule landed in zebra-rs `check.rs` (reserved VRF name) |
+| D2 | Non-show verbs (§4.2) | Extend `zebra.show.v1` with an exec order kind rather than add a new service | Settled in practice for `start\|stop\|restart`: the existing stream carries the verb as the first path segment, with no new order kind. `reset`, `clear` and `generate` should follow the same way |
+| D3 | Multi-subtree consumers (§4.3) | Multi-path subscribe in zebra-rs, rather than a root subscription or several skewed streams | Open. DHCP shipped on two skewed streams per backend |
+| D4 | sysctl defaults (§4.4) | Write only what is configured; record the VyOS-defaults difference | Open |
+| D5 | PBR ownership and spelling (§6.6) | nft in insomnia; `ip rule`, tables and the VRF table-ID contract in zebra-rs; rename the top-level node away from `policy` | Open |
+| D6 | Conntrack notrack-by-default (§6.4) | Do not port | Open |
+| D7 | VTI link state (§7.3) | Always up first; a VICI-driven state API later | Open |
+| D8 | `virtual-server` placement (§8.2) | Top-level `virtual-server`, rendered into the VRRP keepalived instance | Open |
+| D9 | DHCP schema shape (§9) | Decide before any backend work: keep zebra-rs's IETF-draft `system dhcp`, or adopt VyOS's `service dhcp-server` | **Decided** (`design/dhcp.md` DH1): VyOS's `service` trees. `system dhcp` was removed in zebra-rs v26.11.2 |
+| D10 | ML-KEM / post-quantum priority (§7.2) | P3 unless it becomes a product goal | Open |
 
 ## 12. References
 
@@ -922,3 +1060,17 @@ candidate after NAT.
   `src/keepalived.rs`, `src/provider.rs`, `proto/config.proto`,
   `proto/show.proto`.
 - `design/vrrp.md`, `book/src/`.
+
+**Status check, 2026-11-16:**
+- insomnia @ `6f6c88a`: `git log ee4dfaa..` per file; `src/process.rs`,
+  `src/vrf.rs`, `src/links.rs`, `src/provider.rs`, `src/keepalived.rs`,
+  `src/vrrp.rs` (module doc); `design/dhcp.md`, `design/process.md`,
+  `design/vrrp.md`; `CHANGELOG.yaml` (0.3.0); the book lines named in
+  §3; `bdd/tests/features/`.
+- zebra-rs @ `483c330d` (v26.11.4): the commits since `141da2fc` that
+  touch `yang/{config,dhcp,exec,vrrp}.yang`; `src/config/manager.rs`
+  (`SHOW_PROTOS`), `src/config/check.rs` (`reserved_vrf`),
+  `proto/config.proto` (`SubscribeRequest`).
+- Not re-read: vyos-1x, and the parts of zebra-rs's interface, routing
+  and system models that §9 lists as absent, beyond the `config.yang`
+  diff.
